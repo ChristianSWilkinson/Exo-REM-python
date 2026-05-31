@@ -766,6 +766,13 @@ def write_hdf5_output_fortran(path, payload: dict) -> None:
         dset(ly, "gravity", g("layers_gravity_m_s2"), "m.s-2")
         dset(ly, "molar_mass", g("layers_molar_mass_kg_mol"), "kg.mol-1")
         dset(ly, "mean_molar_mass", g("mean_molar_mass_kg_mol"), "kg.mol-1")
+        # Kzz + scale height so the harness can reconstruct the quench timescales
+        # (tmix = scale_height_cm**2 / Kzz) and verify the CO/CH4 quench level.
+        # `/outputs/layers/eddy_diffusion_coefficient` matches the key ExoremOut.kzz
+        # already reads from the Fortran reference output.
+        dset(ly, "eddy_diffusion_coefficient",
+             g("layers_eddy_diffusion_coefficient_cm2_s"), "cm2.s-1")
+        dset(ly, "scale_height", g("layers_scale_height_m"), "m")
 
         vmr = ly.create_group("volume_mixing_ratios")
         dmap(vmr.create_group("absorbers"), g("absorbers_vmr") or {}, "None")

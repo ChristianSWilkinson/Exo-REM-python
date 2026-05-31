@@ -3559,6 +3559,8 @@ def _write_outputs(
         "layers_gravity_m_s2":           getattr(atm, "gravities_layers", None),
         "layers_molar_mass_kg_mol":      mol_lay,
         "mean_molar_mass_kg_mol":        mmm,
+        "layers_eddy_diffusion_coefficient_cm2_s": getattr(atm, "eddy_diffusion_coefficient", None),
+        "layers_scale_height_m":         getattr(atm, "scale_height", None),
         "absorbers_vmr":                 absorbers_vmr,
         "gases_vmr":                     gases_vmr_map,
         # spectra (emergent radiosity CGS -> W m-2 / cm-1)
