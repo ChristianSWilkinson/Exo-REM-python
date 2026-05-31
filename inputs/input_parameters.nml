@@ -1,0 +1,48 @@
+&output_files
+    absorption_cross_section_file_prefix = 'absorption_cross_sections' ! prefix of the absorption cross section files
+/
+
+&spectral_space
+    wavenumber_min = 30.0 ! (cm-1) first wavenumber
+    wavenumber_max = 2530.0 ! (cm-1) last wavenumber
+    wavenumber_step = 0.025 ! (cm-1) wavenumber step size
+	doppler_deviation_tolerance = 0.1 ! max tolerance over Doppler width difference between the two borders of the spectral intervals
+	min_total_interval_size = 200.0 ! (cm-1) minimum size of the spectral interval (more useful for parallelisation)
+/
+
+&k_distribution
+	num_vec = 1  ! number of points in the k distribution
+	resolution = 0.024  ! (cm-1) width of phi between inflection points
+	gtype = 'Gauss-Legendre' !'Gauss-Legendre2' ! type of integration used (Gauss-Legendre|Gauss-Legendre2|Gauss-Chebyshev)
+/
+
+&atmosphere_parameters
+    n_levels = 25 ! number of pressure levels
+    size_thermospace = 15 ! size of the thermodynamical space (number of temperatures if use_profile_mode is False)
+    n_species = 1 ! number of species to mix
+/
+
+&options
+    output_species_by_species = False ! if True, instead of outputting one file for all the species, output one file per species
+    use_profile_mode = False ! if True, pressure and temperature spaces are read as a single pressure/temperature profile
+/
+
+&thermodynamic_space
+    pressure_space = 10000000.0, 4642000.0, 2154000.0, 1000000.0, 464200.0, 215400.0, 100000.0, 46420.0, 21540.0, 10000.0, 4642.0, 2154.0, 1000.0, 464.2, 215.4, 100.0, 46.42, 21.54, 10, 4.642, 2.154, 1.0, 0.4642, 0.2154, 0.1 ! (Pa) pressures
+    temperature_space = 100.0, 150.0, 200.0, 250.0, 300.0, 400.0, 500.0, 600.0, 800.0, 1000.0, 1200.0, 1500.0, 2000.0, 2500.0, 3000.0 ! (K) temperatures
+/
+
+&species_data
+    species_names = 'CO'!'CH4', '13CH4', 'CH3D' ! names of the species
+    species_vmr = 1!0.9888, 0.0112, 0.1515 ! Volume Mixing Ratios of the species
+/
+
+&paths
+	path_absorption_cross_sections = '../outputs/absorption_cross_sections/CO/absorption_cross_sections/' ! path to the absorption cross sections files
+    path_data = '../data/' ! path to molecular parameters files
+	path_k_coefficients = '../outputs/k_coefficients/R200000/'  ! path to the k coefficients files
+    path_lines = '../data/lines/' ! path to the molecular lines files
+    path_species_data = '../data/species/' ! path to molecular parameters files
+    path_outputs = '../outputs/absorption_cross_sections/' ! path to molecular parameters files
+/
+

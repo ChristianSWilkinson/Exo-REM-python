@@ -1,0 +1,59 @@
+[1/6] initialising model state ...
+Reading parameters in file 'inputs/example_no_irr.nml'
+  target_gravity resolved to 25.946 m/s²  (candidates: explicit=10.000, G·M/R²=25.946)
+  Loaded apriori T-profile from fortran_profile_500K.dat (T range 173.3–2978.6 K, p range 1.00e-01–1.00e+07 Pa; P_photo/RCB set to 3.46e+04 Pa)
+  Note: requested wavenumber_max = 30130.0 cm⁻¹ exceeds k-table coverage (8130.0 cm⁻¹).
+  Extension region [8130, 30130] cm⁻¹ will use Rayleigh + Planck only (no line opacity).
+  Spectrum: 130.00 to 30130.00 cm⁻¹ (step 200.00 cm⁻¹, 151 points)
+  + loading k-table for CH4   : CH4.ktable.exorem.h5
+  + loading k-table for CO    : CO.ktable.exorem.h5
+  + loading k-table for CO2   : CO2.ktable.exorem.h5
+  + loading k-table for FeH   : FeH.ktable.exorem.h5
+  + loading k-table for H2O   : H2O.ktable.exorem.h5
+  + loading k-table for H2S   : H2S.ktable.exorem.h5
+  + loading k-table for HCN   : HCN.ktable.exorem.h5
+  + loading k-table for K     : K.ktable.exorem.h5
+  + loading k-table for Na    : Na.ktable.exorem.h5
+  + loading k-table for NH3   : NH3.ktable.exorem.h5
+  + loading k-table for PH3   : PH3.ktable.exorem.h5
+  + loading k-table for TiO   : TiO.ktable.exorem.h5
+  + loading k-table for VO    : VO.ktable.exorem.h5
+  + loading CIA H2-H2    : H2-H2.cia.txt
+  + loading CIA H2-He    : H2-He.cia.txt
+  + loading CIA H2O-H2O  : H2O-H2O.cia.txt
+  loaded 42 gas tables and 17 condensate tables (125 T-points)
+  add_light_source = False → stellar irradiance set to zero (no irradiation)
+  elemental_h_ratio (X/H by number, after metallicity logic):
+    H    Z= 1  X/H = 1.000e+00
+    He   Z= 2  X/H = 8.395e-02
+    C    Z= 6  X/H = 2.951e-03
+    N    Z= 7  X/H = 7.079e-04
+    O    Z= 8  X/H = 5.370e-03
+    Na   Z=11  X/H = 1.862e-05
+    S    Z=16  X/H = 1.413e-04
+    K    Z=19  X/H = 1.175e-06
+    Fe   Z=26  X/H = 2.818e-04
+    Ti   Z=22  X/H = 7.943e-07
+    V    Z=23  X/H = 8.913e-08
+[2/6] installing reference profile 'inputs/atmospheres/temperature_profiles/fortran_profile_500K.dat' ...
+      81 levels; max relative P mismatch = 2.49e-09
+[3/6] altitude (pre-chemistry) ...
+  Mean molar mass: 6.778e+00 g mol⁻¹
+      mu(layer 31) = 6.778 g/mol (placeholder a-priori composition)
+[4/6] thermochemical equilibrium on the installed profile ...
+Calculating thermochemistry at equilibrium...
+  Mean molar mass: 2.544e+00 g mol⁻¹
+      mu(layer 31) = 2.601 g/mol (equilibrium); scale_height 2.240e+04-3.514e+05 m
+[5/6] one radiative-transfer evaluation ...
+Calculating radiative transfer without clouds...
+[6/6] diagnostics
+
+  J_int / (sigma*T_int_th^4) = 0.0217226
+  T_int = 191.95 K   (T_int_th = 500.00 K)
+  T_eff = 191.95 K
+  total column tau (median over wn, g=0) = 1.422e+07
+  photosphere (median tau=2/3) at level 50 (P=1.000e+02 Pa, T=189.2 K)
+
+  FAIL: T_eff off by 61.6%. If mu is now ~2.3-2.5 but T_eff is still low,
+        the residual is in the opacity/chemistry match to Fortran (next audit stage),
+        not the scale_height units.

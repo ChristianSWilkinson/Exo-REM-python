@@ -1,0 +1,18 @@
+# Python compilation and cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.nbc
+*.nbi
+
+# Data and large binaries
+data/
+*.zip
+*.bin
+
+# Output files and dumps
+outputs/
+*.npz
+
+# Mac OS specific (if applicable)
+.DS_Store

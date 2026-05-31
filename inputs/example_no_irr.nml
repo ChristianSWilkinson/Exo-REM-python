@@ -1,0 +1,143 @@
+! Exo-REM example including all the Exo-REM features, using a k-tables with a resolution power of 50 at 1 um.
+
+&output_files
+    spectrum_file_prefix = 'spectra'  ! prefix of the spectrum files
+    temperature_profile_file_prefix = 'temperature_profile'  ! prefix of the temperature profile files
+    vmr_file_prefix = 'vmr'  ! prefix of the volume mixing ratio files files
+    output_files_suffix = 'example_R50_no_irr'  ! suffix of the output files
+/
+
+&target_parameters
+    use_gravity = False  ! if True, uses equatorial gravity instead of mass to calculate gravity
+    use_flattening = True  ! if True, uses flattening instead of polar radius to calculate gravity
+    
+    target_gravity = 10 ! (m/s²) 1 bar gravity of the target
+    target_mass = 1.9e27  ! (kg) mass of the target
+    target_equatorial_gravity = 0  ! (m.s-2) surface gravity of the target 
+    target_equatorial_radius = 69911e3  ! (m) equatorial radius at 1e5 Pa of the target
+    target_polar_radius = 0  ! (m) polar radius at 1e5 Pa of the target
+    target_flattening = 0  ! flattening of the target
+    latitude = 0  ! (deg) latitude of observation on the target
+    target_internal_temperature = 500  ! (K) internal temperature of the target ; used to calculate the internal heating
+
+    emission_angle = 0.0  ! [not used] (deg) emission angle
+	cos_average_angle = 0.666666666666666  ! cosine of average angle, used in the two-streams approximation (default value is 2/3)
+/
+
+&light_source_parameters
+    add_light_source = False  ! if True, add the light source
+    use_irradiation = False  ! if True, use irradiation instead of range to calculate the light source spectrum
+    use_light_source_spectrum = False  ! if True, use a spectrum for the light source instead of a black body    
+
+    light_source_radius = 100e6  ! (m) radius of the light source
+    light_source_range = 2e9  ! (m) distance between the target and the light source
+    light_source_effective_temperature = 3450  ! (K) light source effective temperature 
+    light_source_irradiation = 20000  ! (W.m-2) light source irradiation
+
+    light_source_spectrum_file = 'spectrum_BTSettl_3500K_logg5_met0.dat'  ! spectrum of the light source
+
+    incidence_angle = 0.0  ! [not used] (deg) light source incident light relative to the normal of the atmosphere
+/
+
+&atmosphere_parameters
+    use_metallicity = True  ! if True, uses metallicity instead of H2, He and Z VMR to get the elemental abundances
+    use_pressure_grid = False  ! if True, uses the pressure grid in the temperature profile file to generate the pressure grid
+
+    h2_vmr = 0.6  ! H2 volume mixing ratio
+    he_vmr = 0.1  ! He volume mixing ratio
+    z_vmr = 0.3  ! other species volume mixing ratio
+    metallicity = 10.0  ! (solar metallicity) atmospheric metallicity
+
+    n_levels = 81  ! number of atmospheric levels
+    n_species = 13  ! number of absorbing species ; an error can happen if this number doesn't match the size of species_names or species_mode
+    n_cia = 3  ! number of collision induced absorptions ; an error can happen if this number doesn't match the size of cia_names
+    n_clouds = 2  ! number of clouds in atmosphere ; an error can happen if this number doesn't match the size of the cloud arrays (see clouds_parameters)
+
+    eddy_mode = 'AckermanConvective'  ! eddy diffusion coefficient mode ('constant'|'Ackerman'|'AckermanConvective'|'infinity')
+    eddy_diffusion_coefficient = 1e8  ! (cm2.s-1) eddy diffusion coefficient
+	load_kzz_profile = False  ! if True, use initial Kzz profile defined in vmr_profiles_file (see species_parameters)
+
+    pressure_min = 1e-1  ! (Pa) pressure at the top of the atmospheric grid
+    pressure_max = 1e7  ! (Pa) pressure at the bottom of the atmospheric grid
+/
+
+&species_parameters
+    use_atmospheric_metallicity = False  ! if True, use the atmospheric metallicity instead of the element/H ratios or the elements metallicity to get the elemental abundances
+    use_elements_metallicity = True  ! if True, use elemental metallicity instead of the element/H ratios to get the elemental abundances
+
+    elements_names = 'He', 'Ne', 'Ar', 'Kr', 'Xe'  ! elements listed here won't have the atmospheric metallicity if use_atmospheric_metallicity is False (atmosphere_parameters/metallicity)
+    elements_h_ratio = 8.395e-2, 1e-30, 1e-30, 1e-30, 1e-30  ! <element>/H ratio of the elements listed above (only used if both use_atmospheric_metallicity and use_elements_metallicity are False)
+    elements_metallicity = 1, 1, 1, 1, 1  ! (solar metallicity) elemental metallicity of the elements listed above
+
+    species_names = 'CH4', 'CO', 'CO2', 'FeH', 'H2O', 'H2S', 'HCN', 'K', 'Na', 'NH3', 'PH3', 'TiO', 'VO'  ! absorbing species in the atmosphere
+    species_at_equilibrium = False, False, False, False, False, False, False, False, False, False, False, False, False  ! if True, the absorbing species is at thermochemical equilibrium, else it is out of equilibrium
+    cia_names = 'H2-H2', 'H2-He', 'H2O-H2O'  ! collision induced absorptions to be included
+
+	load_vmr_profiles = False  ! if True, load VMR profiles from a file (can be useful only if chemistry is deactivated)
+	vmr_profiles_file = 'vmr_example_ref.dat'  ! VMR profiles file, ignored if load_vmr_profiles, load_kzz_profile and load_cloud_profiles are all False
+	use_chemistry = True  ! if True, calculate self-consistent chgemistry
+	use_rayleigh = True  ! if True, add Rayleigh scattering of gaseous species
+/
+
+&spectrum_parameters
+    wavenumber_min = 130  ! (cm-1) first wavenumber of the calculated spectrum
+    wavenumber_max = 30130  ! (cm-1) last wavenumber of the calculated spectrum
+    wavenumber_step = 200  ! (cm-1) wavenumber step of the calculated spectrum
+/
+
+&clouds_parameters
+    cloud_mode = 'fixedRadiusTime'  ! cloud mode ('fixedRadius'|'fixedSedimentation'|'fixedRadiusCondensation'|'fixedRadiusTime')
+    cloud_fraction = 0.15  ! cloud cover fraction
+
+    cloud_names = 'H2O', 'KCl'  ! condensing species forming the clouds
+    cloud_particle_radius = 50e-6, 5e-6  ! (m) mean radius of the cloud particles (fixed radius modes)
+    sedimentation_parameter = 2, 2  ! sedimentation parameter of the clouds
+	supersaturation_parameter = 0.003, 0.003 ! 0.003, 0.1  ! supersaturation parameter of the clouds
+	sticking_efficiency = 1.0, 1.0  ! sticking efficiency of the clouds
+    cloud_particle_density = 917, 1980  ! (kg.m-3) density of the clouds particles
+    reference_wavenumber = 1e4, 1e4  ! (cm-1) [for diagnostic] wavenumber for cloud optical depth output
+	
+	load_cloud_profiles = False  ! if True, use initial cloud profile defined in vmr_profiles_file
+/
+
+&retrieval_parameters
+    ! temperature_profile_file = "guillot"
+    temperature_profile_file = "fortran_profile_500K.dat"
+    retrieval_level_bottom = 1  ! min level for flux retrieval
+    retrieval_level_top = 81  ! max level for flux retrieval
+    retrieval_flux_error_bottom = 1e-3  ! relative flux error at the bottom of the atmospheric grid
+    retrieval_flux_error_top = 1e-5  ! relative flux error at the top of the atmospheric grid
+
+    n_iterations = 1000  ! number of iterations
+    n_non_adiabatic_iterations = 15  ! number of iterations without including the adiabatic correction (necessary for convergence)
+    chemistry_iteration_interval = 5  ! number of iterations between 2 calls of the of the thermochemical equilibrium
+    cloud_iteration_interval = 4  ! number of iterations between 2 calls of the cloud physics
+    n_burn_iterations = 99  ! number of iterations before the end where all the physics is calculated at every iterations
+
+    retrieval_tolerance = 0.001  ! tolerance for the  flux convergence (set to 0 to use the iterations limits)
+    smoothing_bottom = 1  ! (height scale) vertical profile smoothing at the bottom of the atmosphere
+    smoothing_top = 0.1  ! (height scale) vertical profile smoothing at the top of the atmosphere
+    weight_apriori = 1.0  ! weight of the a priori, low weight means small variations
+/
+
+&options
+	output_transmission_spectra = True  ! if True, output the transmission spectra
+    output_species_spectral_contributions = True  ! if True, output the absorbers spectral contribution
+    output_cia_spectral_contribution = True  ! if True, output the CIA spectral contribution
+    output_thermal_spectral_contribution = True  ! if True, output the thermal spectral contribution
+	output_fluxes = True  ! if True, output the radiosities without the effect of irradiance
+    output_hdf5 = True  ! if True, output an HDF5 file instead of ASCII files
+	output_full = True  ! if True, output all the parameters instead of a minimal selection of parameters, ignored if output_hdf5 is True
+/
+
+&paths
+    path_data = '../data/'  ! path to molecular parameters files
+    path_cia = '../data/cia/'  ! path to collision induced absorption files
+    path_clouds = '../data/cloud_optical_constants/'  ! path to the absorption cross sections files
+    path_k_coefficients = '../data/k_coefficients_tables/R50/'  ! path to the k coefficients files
+    path_temperature_profile = '../inputs/atmospheres/temperature_profiles/'  ! path to the a-priori temperature profile file
+	path_thermochemical_tables = '../data/thermochemical_tables/'  ! path to the thermochemical tables files
+	path_vmr_profiles = '../inputs/atmospheres/vmr_profiles/'  ! path to the VMR profiles
+    path_light_source_spectra = '../data/stellar_spectra/'  ! path to the stellar spectra
+    path_outputs = '../outputs/exorem/'  ! path to molecular parameters files
+/
