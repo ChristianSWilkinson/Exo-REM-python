@@ -14,6 +14,8 @@ to a few percent and the bolometric effective temperature to ~0.5 %
 (`T_eff = 500.2 K` vs the 500 K target), and the full self-consistent loop
 converges in ~71 iterations with a well-conditioned inversion.
 
+If used please cite the original fortran code (https://gitlab.obspm.fr/Exoplanet-Atmospheres-LESIA/exorem) and the associated papers.
+
 ---
 
 ## 1. Installation
@@ -31,6 +33,8 @@ No build step is required. Put the `exorem/` package on your `PYTHONPATH`
 (or run from its parent directory) and make sure the data directory referenced
 by your namelist (k-tables, CIA tables, thermochemical tables, profiles) is in
 place.
+
+The data to use is identical to the data from https://gitlab.obspm.fr/Exoplanet-Atmospheres-LESIA/exorem. 
 
 ---
 
@@ -71,6 +75,8 @@ configured tolerance (default `1e-3`).
 ## 3. Inputs
 
 ### 3.1 The namelist
+
+The input file is identical to the one from https://gitlab.obspm.fr/Exoplanet-Atmospheres-LESIA/exorem.
 
 The namelist is grouped into Fortran-style sections. The parameters most users
 will set:
@@ -162,6 +168,8 @@ Referenced relative to `path_data`:
 ## 4. Outputs
 
 Written under `path_outputs`:
+
+The .h5 output file is identical to the one from https://gitlab.obspm.fr/Exoplanet-Atmospheres-LESIA/exorem.
 
 | File | Contents |
 | --- | --- |
