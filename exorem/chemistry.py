@@ -1483,18 +1483,27 @@ def _calculate_nh3_n2_hcn(
     idx_n2  = gas_id("N2")
     idx_hcn = gas_id("HCN")
     idx_ch4 = gas_id("CH4")
+    idx_h2  = gas_id("H2")
 
     dg_nh3 = gases_delta_g_i[idx_nh3]
     dg_n2  = gases_delta_g_i[idx_n2]
     dg_hcn = gases_delta_g_i[idx_hcn]
     dg_ch4 = gases_delta_g_i[idx_ch4]
 
-    p_bar = p * 1e-3
+    # Pressure in BAR.  `p = pressures_layers·1e-3`, so bar = p·1e-2
+    # (= pressures_layers·1e-5).  The prior `p*1e-3` was bar/10 — the legacy
+    # N/metal-routine unit bug.  k_eq_nh3 carries P² and k_eq_hcn carries P⁻²,
+    # so the 10× pressure error pushed NH3 ~1 dex LOW and HCN ~1 dex HIGH.
+    p_bar = p * 1e-2
+    qh2 = max(vmr[idx_h2], 1e-30)        # H2 mole fraction (~0.85), tracked
 
-    # K(N2 + 3H2 → 2NH3)  -- pressure-power = +2
+    # K(N2 + 3H2 → 2NH3).  The Fortran k_eq divides equilibrium_constant_gases by
+    # h2_factor = qH2^(stoich_H2) = qH2^(-3), i.e. multiplies by qH2³.  Omitting
+    # it (the qH2≈1 shortcut) left NH3 ~0.2 dex high; with the bar fix the two
+    # together resolve the −0.85 dex offset.
     k_nh3 = equilibrium_constant_gases([-1, -3, 2],
                                        [dg_n2, 0.0, dg_nh3],
-                                       p_bar, t)
+                                       p_bar, t) * qh2 ** 3
     if not math.isfinite(k_nh3) or k_nh3 < 0:
         k_nh3 = 0.0
 
@@ -1526,13 +1535,15 @@ def _calculate_nh3_n2_hcn(
     vmr[idx_n2]  = qn2
 
     # ---- HCN from CH4 + N2 ---------------------------------------------
-    # K_hcn for 2CH4 + N2 → 2HCN + 3H2
-    k_hcn_bare = equilibrium_constant_gases([-2, -1, 2, 3],
-                                            [dg_ch4, dg_n2, dg_hcn, 0.0],
-                                            p_bar, t)
+    # K_hcn for 2CH4 + N2 → 2HCN + 3H2.  H2 stoich = +3 ⇒ h2_factor = qH2³ ⇒
+    # divide by qH2³ (Fortran k_eq).  p_power = -2, so the corrected bar drops
+    # HCN back ~1 dex toward the Fortran (it was ~1 dex high from bar/10).
+    k_hcn_bare = (equilibrium_constant_gases([-2, -1, 2, 3],
+                                             [dg_ch4, dg_n2, dg_hcn, 0.0],
+                                             p_bar, t) / qh2 ** 3)
     if math.isfinite(k_hcn_bare) and k_hcn_bare > 0 and qn2 > 0:
         qch4 = vmr[idx_ch4]
-        # qHCN² = K · qCH4² · qN2   (qH2 = 1)
+        # qHCN² = K · qCH4² · qN2   (qH2³ already folded into k_hcn_bare)
         qhcn_sq = k_hcn_bare * qch4 * qch4 * qn2
         qhcn = math.sqrt(max(qhcn_sq, 0.0))
         # Cap at 0.5·X_N to keep N conservation reasonable (Fortran

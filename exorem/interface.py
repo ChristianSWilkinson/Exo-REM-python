@@ -758,6 +758,8 @@ def write_hdf5_output_fortran(path, payload: dict) -> None:
         dset(lv, "is_convective", g("is_convective"), "None")
         dset(lv, "gradiant_temperature", g("gradiant_temperature"), "None")
         dset(lv, "radiosity_error", g("levels_radiosity_error_W_m2"), "W.m-2")
+        # convective flux (diagnostics) — matches the Fortran levels dataset name
+        dset(lv, "radiosity_convective", g("levels_radiosity_convective_W_m2"), "W.m2")
 
         # ---- layers ------------------------------------------------------
         ly = out.create_group("layers")
@@ -773,6 +775,9 @@ def write_hdf5_output_fortran(path, payload: dict) -> None:
         dset(ly, "eddy_diffusion_coefficient",
              g("layers_eddy_diffusion_coefficient_cm2_s"), "cm2.s-1")
         dset(ly, "scale_height", g("layers_scale_height_m"), "m")
+        # molar heat capacity (diagnostics) — matches the Fortran layers dataset
+        dset(ly, "isobaric_molar_heat_capacity",
+             g("layers_isobaric_molar_heat_capacity_J_K_mol"), "J.K-1.mol-1")
 
         vmr = ly.create_group("volume_mixing_ratios")
         dmap(vmr.create_group("absorbers"), g("absorbers_vmr") or {}, "None")

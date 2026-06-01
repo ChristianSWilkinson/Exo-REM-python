@@ -551,6 +551,7 @@ def run_exorem(input_file: str | Path) -> dict:
 
         timer.tick("kzz_update")
         # --- Kzz update ---
+        atm.flux_conv = flux_conv      # persist for the HDF5 dump (diagnostics)
         if not opts.get("load_kzz_profile", False):
             _calculate_eddy_diffusion_coefficient(
                 atm, target, spec, retrieval, gases_vmr,
@@ -2239,6 +2240,11 @@ def _calculate_eddy_diffusion_coefficient(
     T_int    = target.target_internal_temperature
     alpha    = max(min(1.0 + 2.0 * (1500.0 - T_int) / 1200.0, 3.0), 1.0)
     iconv = 0
+    # diagnostics: store cpr and gr per layer so the harness can compare the
+    # convective-flux inputs (the residual Kzz traces to flux_conv/cpr, not the
+    # formula).  Filled in the loop below; last layer mirrors the previous one.
+    atm.cpr_layers = np.zeros(n_layers)
+    atm.gr_layers  = np.zeros(n_layers)
 
     for i in range(n_layers - 1):
         t_layer = math.sqrt(atm.temperatures_layers[i] * atm.temperatures_layers[i + 1])
@@ -2253,6 +2259,8 @@ def _calculate_eddy_diffusion_coefficient(
         gr = (cpr * math.log(atm.temperatures_layers[i + 1] / atm.temperatures_layers[i])
               / math.log(atm.pressures_layers[i + 1] / atm.pressures_layers[i])) \
             if atm.pressures_layers[i + 1] != atm.pressures_layers[i] else 0.0
+        atm.cpr_layers[i] = cpr
+        atm.gr_layers[i]  = gr
 
         # scale_height is stored in METRES (= R·T/(μ·g) ≈ 1.4e5 m).  The Fortran
         # Kzz formula (exorem.f90 calculate_eddy_diffusion_coefficient) uses the
@@ -2267,12 +2275,18 @@ def _calculate_eddy_diffusion_coefficient(
         p_i  = atm.pressures_layers[i]
         J_i  = radiosity_internal_target[i]
 
+        # Flux-term units: the Fortran writes this term with gravity in CGS
+        # (cm s⁻², = g_SI·100) and pressure as `1d2·pressures_layers` with
+        # pressures_layers in mbar (= P in Pa).  In SI (g in m s⁻², p in Pa) the
+        # Fortran's `*1d-2 ... /(1d2·p_mbar)` reduces exactly to `*g/p`, i.e. the
+        # `1e-2` and `1e2` factors cancel the 100× CGS-gravity and the mbar→Pa
+        # conversions.  Writing them literally (as before) left the flux argument
+        # 1e4× too small ⇒ Kzz 21.5× too small (the residual after the H_km fix).
         if atm.eddy_mode == "Ackerman":
             ml = H_m * max(0.1, gr)
             kzz = (1e4 * H_m / 3.0
                    * (ml / H_m) ** (4.0 / 3.0)
-                   * (1e-3 * J_i / cpr * H_m * g_i * 1e-2
-                      / (1e2 * p_i)) ** (1.0 / 3.0))
+                   * (1e-3 * J_i / cpr * H_m * g_i / p_i) ** (1.0 / 3.0))
             atm.eddy_diffusion_coefficient[i] = kzz
 
         elif atm.eddy_mode in ("AckermanConvective", "infinity"):
@@ -2280,20 +2294,23 @@ def _calculate_eddy_diffusion_coefficient(
             kzz = (1e4 * H_m / 3.0
                    * (ml / H_m) ** (4.0 / 3.0)
                    * (1e-3 * max(flux_conv[i], 1e-6 * radiosity_internal_target[0])
-                      / cpr * H_m * g_i * 1e-2
-                      / (1e2 * p_i)) ** (1.0 / 3.0))
+                      / cpr * H_m * g_i / p_i) ** (1.0 / 3.0))
             if flux_conv[i] > 1.0:
                 iconv = i
                 eddy_overshoot = 0.0
             else:
                 kzz_conv = atm.eddy_diffusion_coefficient[iconv]
+                # Fortran overshoot uses sqrt(gravities_layers/1d5) with gravity
+                # in CGS (cm s⁻²); in SI (g in m s⁻²) that is sqrt(g/1e3), not /1e5.
                 eddy_overshoot = (kzz_conv
                                   * (atm.scale_height[i] / atm.scale_height[iconv]) ** 2
                                   * (p_i / atm.pressures_layers[iconv])
-                                  ** (alpha * math.sqrt(g_i / 1e5)))
+                                  ** (alpha * math.sqrt(g_i / 1e3)))
             atm.eddy_diffusion_coefficient[i] = max(kzz, eddy_overshoot)
 
     atm.eddy_diffusion_coefficient[n_layers - 1] = atm.eddy_diffusion_coefficient[n_layers - 2]
+    atm.cpr_layers[n_layers - 1] = atm.cpr_layers[n_layers - 2]
+    atm.gr_layers[n_layers - 1]  = atm.gr_layers[n_layers - 2]
 
 
 def _calculate_thermochemical_equilibrium(
@@ -3561,6 +3578,12 @@ def _write_outputs(
         "mean_molar_mass_kg_mol":        mmm,
         "layers_eddy_diffusion_coefficient_cm2_s": getattr(atm, "eddy_diffusion_coefficient", None),
         "layers_scale_height_m":         getattr(atm, "scale_height", None),
+        # convective-flux diagnostics (matching the Fortran HDF5 dataset names):
+        # radiosity_convective (levels, W m-2) and c_p (layers, J K-1 mol-1)
+        "levels_radiosity_convective_W_m2": (getattr(atm, "flux_conv", None) * 1e-3
+                                             if getattr(atm, "flux_conv", None) is not None else None),
+        "layers_isobaric_molar_heat_capacity_J_K_mol": (getattr(atm, "cpr_layers", None) * CST_R
+                                             if getattr(atm, "cpr_layers", None) is not None else None),
         "absorbers_vmr":                 absorbers_vmr,
         "gases_vmr":                     gases_vmr_map,
         # spectra (emergent radiosity CGS -> W m-2 / cm-1)
