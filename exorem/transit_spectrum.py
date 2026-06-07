@@ -16,8 +16,8 @@ def calculate_transit_spectrum(
     tau:           np.ndarray,    # (n_levels, n_wavenumbers, n_g)
     tau_rayleigh:  np.ndarray,    # (n_levels, n_wavenumbers)
     weights_k:     np.ndarray,    # (n_g,)
-    z:             np.ndarray,    # (n_levels,) altitudes in km
-    target_radius: float,         # (m or km) consistent with z, see notes
+    z:             np.ndarray,    # (n_levels,) altitudes in METRES
+    target_radius: float,         # (metres) planetary radius at z[0]
     *,
     calculate_contribution: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -33,12 +33,11 @@ def calculate_transit_spectrum(
     weights_k
         Quadrature weights of the k-distribution.
     z
-        Altitudes of the level grid. Must be in the same length unit as
-        ``target_radius`` for the squared sums to be dimensionally consistent
-        (the original Fortran uses km throughout and rescales by 1e3 at the
-        end to return metres).
+        Altitudes of the level grid, in METRES (this port carries z and
+        target_radius in metres; the original Fortran used km and rescaled by
+        1e3 at the end — we work in metres throughout and do NOT rescale).
     target_radius
-        Planetary radius at z[0].
+        Planetary radius at z[0], in METRES.
     calculate_contribution
         If True, also return the per-layer contribution function
         ``d_spectral_radius``.
@@ -113,9 +112,12 @@ def calculate_transit_spectrum(
                     d_spectral_radius[j, i] += area_l[l] * float(np.dot(contrib, weights_k))
 
             d_spectral_radius[n_levels - 1, i] = transmittance_l[n_layers - 1]
-            d_spectral_radius[:, i] = np.sqrt(np.maximum(d_spectral_radius[:, i], 0.0)) * 1e3
+            # NOTE: this port passes z and target_radius in METRES (the Fortran
+            # uses km and rescales by 1e3 here).  Since our inputs are already
+            # metres, the result is already metres — do NOT multiply by 1e3.
+            d_spectral_radius[:, i] = np.sqrt(np.maximum(d_spectral_radius[:, i], 0.0))
 
-        spectral_radius[i] = np.sqrt(spectral_radius[i]) * 1e3   # km → m
+        spectral_radius[i] = np.sqrt(spectral_radius[i])   # already metres (inputs are m)
 
     return spectral_radius, d_spectral_radius
 

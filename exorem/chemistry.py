@@ -359,6 +359,19 @@ def calculate_chemistry(
     co_ch4_quench = co_co2_quench = False
     qcoco2 = qch4q = 0.0
 
+    # Previous-layer chemical/mixing timescales, needed to interpolate the
+    # quench point (Fortran tracks tchemC1/tchemCO21/tmix1).  Seed from the
+    # init_non_equilibrium virtual deeper layer (1.198·T₀, 2·P₀); tmix1 is
+    # seeded as 1.4352·tmix on the first layer (tmix needs the loop's Kzz).
+    _pold0 = 2.0 * pressures_layers[0] * 1e-5
+    _told0 = temperatures_layers[0] * 1.198
+    _mco0  = 0.5 * (metallicity_c + metallicity_o)
+    _tq1_0 = 1.5e-6 * math.exp(4.2e4 / _told0) * _mco0 ** (-0.70) / _pold0
+    _tq2_0 = 4.0e1 * _mco0 ** (-0.70) * math.exp(2.5e4 / _told0) / (_pold0 * _pold0)
+    tchemc1   = 1.0 / (1.0 / _tq1_0 + 1.0 / _tq2_0)
+    tchemco21 = 1.0e-10 * math.exp(3.8e4 / _told0) / math.sqrt(_pold0)
+    tmix1     = None
+
     # ----------- initialise VMR from elemental abundances ------------------
     _init_gas_element_abd(gases_vmr, gas_element_abd, elemental_h_ratio,
                           elements_in_gases, nlay)
@@ -390,6 +403,8 @@ def calculate_chemistry(
         tmix, tchemc, tchemco2, tchemn, tchemhcn = _calculate_time_constants(
             t, p_bar_ip, scale_height[ip], eddy_diffusion_coefficient[ip],
             metallicity_c, metallicity_n, metallicity_o, at_equilibrium)
+        if tmix1 is None:
+            tmix1 = 1.4352 * tmix      # init_non_equilibrium seed
 
         # -- H₂ / H equilibrium --
         gases_vmr[:, ip] = _calculate_h2_h_equilibrium(
@@ -405,18 +420,40 @@ def calculate_chemistry(
         else:
             # --- CARBON QUENCH: freeze C totals, re-solve O via osiqco --------
             # Mirrors the Fortran: below tchemC≤tmix → osi (equilibrium, above);
-            # at the crossing co_ch4_quenching freezes qcoco2=CO+CO2 and qch4q=CH4
-            # (captured from the carried-forward last-equilibrium layer), then
+            # at each crossing the quench routines INTERPOLATE the true (T,P) and
+            # re-solve there to capture qcoco2=CO+CO2 / qch4q=CH4·(1+ech3q), then
             # osiqco (CO frozen) / osiqcoco2 (CO+CO2 frozen) hold them aloft while
             # re-solving H2O from oxygen conservation.
             if not co_ch4_quench:
                 co_ch4_quench = True
-                qcoco2 = gases_vmr[idx_co, ip] + gases_vmr[idx_co2, ip]
-                qch4q  = gases_vmr[idx_ch4, ip]
+                # Interpolated CO/CH4-quench capture (Fortran co_ch4_quenching):
+                # interpolate the true (T,P) of the tchemC=tmix crossing, re-solve
+                # the C/O/Si equilibrium there, and capture the totals from it.
+                # The grid layer is ~40-50 K colder than the crossing, where
+                # equilibrium has already shifted toward CH4 → grid capture would
+                # freeze CO+CO2 (and thus CO2) too low.
+                _told, _pold = _get_pold_told(ip, temperatures_layers, pressures_layers)
+                _tqC, _pqC, _ = _quench_interp_pt(
+                    _told, _pold, t, p_bar_ip, tchemc1, tmix1, tchemc, tmix)
+                _dgq = np.array([
+                    interp_ex_0d(_tqC, temperatures_thermochemistry, gases_delta_g[k, :])
+                    for k in range(N_GASES)])
+                _vmrq = gases_vmr[:, ip].copy()
+                _qh2q = _vmrq[gas_id("H2")] if _vmrq[gas_id("H2")] > 0 else 1e-300
+                _kcoq  = _keq(["H2O", "CH4", "CO", "H2"], [-1, -1, 1, 3], _dgq, _pqC, _tqC, _qh2q)
+                _ech3q = math.sqrt(max(
+                    _keq(["CH4", "CH3", "H2"], [-2, 2, 1], _dgq, _pqC, _tqC, _qh2q), 0.0))
+                _kco2q = _keq(["CO", "H2O", "CO2", "H2"], [-1, -1, 1, 1], _dgq, _pqC, _tqC, _qh2q)
+                _ksiq  = _keq(["SiH4", "H2O", "SiO", "H2"], [-1, -1, 1, 3], _dgq, _pqC, _tqC, _qh2q)
+                _vmrq, _, _, _, _ = _osi(
+                    _vmrq, gas_element_abd[:, ip], elements_in_gases, _dgq,
+                    _kcoq, _ech3q, _kco2q, _ksiq, _pqC, _tqC, False)
+                qcoco2 = _vmrq[idx_co] + _vmrq[idx_co2]
+                qch4q  = _vmrq[idx_ch4] * (1.0 + _ech3q)
             gases_vmr[idx_ch4, ip] = qch4q
             gases_vmr[idx_ch3, ip] = 1e-300
             # H₂O condensation (same closure as the equilibrium routine)
-            p_bar_eq = p * 1e-3
+            p_bar_eq = p * 1e-2          # bar (was p·1e-3 = bar/10)
             qsat_h2o = h2o_saturation_pressure(t) / p_bar_eq
             vmr_sat_condensates[condensate_id("H2O"), ip] = qsat_h2o
             h2o_sat = gases_vmr[idx_h2o, ip] >= qsat_h2o
@@ -432,6 +469,19 @@ def calculate_chemistry(
             else:
                 if not co_co2_quench:
                     co_co2_quench = True
+                    # Interpolated CO/CO2-quench capture (Fortran co_co2_quenching):
+                    # re-solve osiqco at the interpolated tchemCO2=tmix crossing so
+                    # the CO/CO2 that osiqcoco2 then freezes are taken at the true
+                    # (hotter) quench point rather than the colder grid layer.
+                    _told, _pold = _get_pold_told(ip, temperatures_layers, pressures_layers)
+                    _tqC2, _pqC2, _ = _quench_interp_pt(
+                        _told, _pold, t, p_bar_ip, tchemco21, tmix1, tchemco2, tmix)
+                    _dgq2 = np.array([
+                        interp_ex_0d(_tqC2, temperatures_thermochemistry, gases_delta_g[k, :])
+                        for k in range(N_GASES)])
+                    gases_vmr[:, ip] = _osiqco(
+                        _tqC2, _pqC2 * 1e2, ip, gases_vmr[:, ip], _dgq2,
+                        gas_element_abd[:, ip], qcoco2, h2o_sat)
                 gases_vmr[:, ip] = _osiqcoco2(
                     t, p, ip, gases_vmr[:, ip], gases_delta_g_i,
                     gas_element_abd[:, ip], h2o_sat)
@@ -528,6 +578,10 @@ def calculate_chemistry(
         # Update elemental abundances from VMR
         _update_gas_element_abd(gases_vmr[:, ip], gas_element_abd[:, ip],
                                 elements_in_gases)
+
+        # Carry this layer's timescales forward for the next layer's quench
+        # interpolation (Fortran: tchemC1=tchemC, tchemCO21=tchemCO2, tmix1=tmix).
+        tchemc1, tchemco21, tmix1 = tchemc, tchemco2, tmix
 
     # ---------------------------------------------------------------------
     # Normalisation step
@@ -1072,6 +1126,47 @@ def _calculate_h2o_ch4_co_co2_sih4_sio(
     return vmr, is_condensed, vmr_sat, layer_cond
 
 
+# ---------------------------------------------------------------------------
+#  Interpolated-quench helpers (Fortran get_pold_told + the log-interpolation
+#  in co_ch4_quenching / co_co2_quenching).  At the crossing where a chemical
+#  timescale overtakes the mixing timescale, the Fortran does NOT capture the
+#  quenched abundances at the grid layer; it interpolates the true (T,P) of the
+#  crossing and re-solves the equilibrium there.  The grid layer sits ~40-50 K
+#  COLDER than that crossing, where equilibrium has already shifted toward CH4,
+#  so capturing at the grid layer freezes CO+CO2 (hence CO2) too low.
+# ---------------------------------------------------------------------------
+def _get_pold_told(ip, temperatures_layers, pressures_layers):
+    """Previous-layer T (K) and P (bar); at ip==0 the Fortran seed: a virtual
+    deeper layer at 1.198·T and 2·P (Fortran get_pold_told, chemistry.f90 1581).
+    pressures_layers is in Pa here, so bar = ·1e-5."""
+    if ip == 0:
+        told = temperatures_layers[0] * 1.198
+        pold = 2.0 * pressures_layers[0] * 1e-5
+    else:
+        told = temperatures_layers[ip - 1]
+        pold = pressures_layers[ip - 1] * 1e-5
+    return told, pold
+
+
+def _quench_interp_pt(told, pold, t, p_bar, tchem1, tmix1, tchem, tmix):
+    """Log-interpolate the quench (T[K], P[bar]) between the previous layer
+    (subscript 1) and the current layer (Fortran co_ch4/co_co2_quenching):
+        x = log(tchem1/tmix1) / log(tchem1·tmix / (tchem·tmix1))
+        Tq = told·(t/told)^x ,  Pq = pold·(p/pold)^x .
+    x is clamped to [0,1] for safety (it is analytically in-range at a genuine
+    crossing where tchem1<tmix1 and tchem>tmix)."""
+    denom = math.log(tchem1 * tmix / (tchem * tmix1))
+    if denom == 0.0 or not math.isfinite(denom):
+        return t, p_bar, 0.0
+    x = math.log(tchem1 / tmix1) / denom
+    if not math.isfinite(x):
+        return t, p_bar, 0.0
+    x = min(1.0, max(0.0, x))
+    tq = told * (t / told) ** x
+    pq = pold * (p_bar / pold) ** x
+    return tq, pq, x
+
+
 def _osiqco(t, p, ip, vmr, gases_delta_g_i, gas_element_abd_ip, qcoco2,
             h2o_saturated):
     """CO quenched: CO+CO₂ frozen at total ``qcoco2``; re-solve H₂O (O-balance),
@@ -1091,7 +1186,12 @@ def _osiqco(t, p, ip, vmr, gases_delta_g_i, gas_element_abd_ip, qcoco2,
 
     O  = float(gas_element_abd_ip[7])                 # O  (Z=8 → idx 7)
     Si = float(gas_element_abd_ip[13]) if have_si else 0.0   # Si (Z=14 → idx 13)
-    p_bar = p * 1e-3
+    # bar = p·1e-2 (= pressures_layers·1e-5), matching _equil_co_si_o and the
+    # Fortran (whose osiqco receives k's built at the layer's bar pressure).
+    # The previous p·1e-3 was bar/10, the same unit bug fixed in NH3/HCN: it
+    # made k_sih4 (∝ P⁻²) ~100× too large → SiO O-sink too deep → H2O (hence
+    # CO2 = CO·H2O·k_co2/H2) biased low in this quench region.
+    p_bar = p * 1e-2
 
     dg_h2o = gases_delta_g_i[iH2O]; dg_co = gases_delta_g_i[iCO]
     dg_co2 = gases_delta_g_i[iCO2]
@@ -1151,7 +1251,7 @@ def _osiqcoco2(t, p, ip, vmr, gases_delta_g_i, gas_element_abd_ip,
 
     O  = float(gas_element_abd_ip[7])
     Si = float(gas_element_abd_ip[13]) if have_si else 0.0
-    p_bar = p * 1e-3
+    p_bar = p * 1e-2                  # bar (was p·1e-3 = bar/10; see _osiqco note)
     co  = max(vmr[iCO], 0.0)
     co2 = max(vmr[iCO2], 0.0)
 

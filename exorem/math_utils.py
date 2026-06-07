@@ -27,6 +27,11 @@ PREC_LOW:  float = 10.0 ** -np.finfo(np.float32).precision   # ~1e-6
 
 _Number = Union[float, np.ndarray]
 
+# Faithfulness flag: use the Fortran's hand-rolled no-pivot Doolittle LU in
+# matinv() (True, default) or fall back to LAPACK np.linalg.inv (False).
+# See matinv() for why this matters in the ill-conditioned retrieval inversion.
+MATINV_FAITHFUL: bool = True
+
 
 # ===========================================================================
 # Goodness of fit
@@ -497,17 +502,60 @@ def quicksort_index(array: np.ndarray) -> np.ndarray:
 
 def matinv(a: np.ndarray, n: int | None = None) -> np.ndarray:
     """
-    Invert a square matrix.  The Fortran version mutates *a* in place;
-    here we return a fresh array but also overwrite *a* for parity.
+    Invert a square matrix.  The Fortran version (math.f90:1651) mutates *a* in
+    place; here we return a fresh array but also overwrite *a* for parity.
 
-    Falls back to :func:`numpy.linalg.inv` which uses LAPACK.
+    FAITHFULNESS NOTE.  The Fortran uses a hand-rolled Doolittle LU
+    factorisation with **NO pivoting** (it divides by the bare diagonal
+    a(k,k)).  ``np.linalg.inv`` uses LAPACK's LU with **partial pivoting**.
+    For a well-conditioned matrix the two agree to machine precision, but the
+    retrieval's observation-space matrix  M = Kᵀ·S·K + diag(rad_noise²)  is
+    ill-conditioned in the optically-thin upper atmosphere (cond ≳ 1e6), and
+    its a-priori covariance S is a *non-stationary* Gaussian kernel without the
+    Gibbs PSD normalisation — so M is not guaranteed SPD.  For an indefinite,
+    ill-conditioned matrix pivoting vs no-pivoting give genuinely different
+    inverses, and the difference is what makes the Python retrieval oscillate
+    (→ thin-zone hot bubble / cold-top) where the Fortran converges.  To
+    reproduce the reference we must use the SAME no-pivot factorisation.
+
+    Set ``MATINV_FAITHFUL = False`` to fall back to ``np.linalg.inv`` (the old
+    LAPACK path) for A/B comparison.
     """
     a = np.asarray(a, dtype=float)
     if n is not None and a.shape != (n, n):
         raise ValueError(f"matinv: array is not {n}×{n}")
-    inv = np.linalg.inv(a)
-    a[...] = inv
-    return inv
+
+    if not MATINV_FAITHFUL:
+        inv = np.linalg.inv(a)
+        a[...] = inv
+        return inv
+
+    N = a.shape[0]
+    U = a.copy()                     # becomes the upper-triangular factor
+    L = np.eye(N)                    # unit lower-triangular factor
+
+    # Step 1 — forward elimination (Doolittle, NO pivoting).  Each update
+    # U[i, j] -= coeff_i * U[k, j] is independent (no accumulation), so the
+    # vectorised rank-1 update is bit-identical to the Fortran's i/j loops.
+    for k in range(N - 1):
+        piv = U[k, k]
+        coeffs = U[k + 1:, k] / piv          # multipliers for rows below k
+        L[k + 1:, k] = coeffs
+        U[k + 1:, k + 1:] -= np.outer(coeffs, U[k, k + 1:])
+        U[k + 1:, k] = 0.0
+
+    # Step 3 — solve A·X = I column-by-column via L·D = I then U·X = D.
+    # Forward substitution for D = L⁻¹ (L is unit lower-triangular):
+    D = np.eye(N)
+    for i in range(1, N):
+        D[i, :] -= L[i, :i] @ D[:i, :]
+    # Back substitution for X = U⁻¹·D:
+    X = np.empty((N, N))
+    for i in range(N - 1, -1, -1):
+        X[i, :] = (D[i, :] - U[i, i + 1:] @ X[i + 1:, :]) / U[i, i]
+
+    a[...] = X
+    return X
 
 
 # ===========================================================================

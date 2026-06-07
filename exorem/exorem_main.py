@@ -293,6 +293,14 @@ def run_exorem(input_file: str | Path) -> dict:
     # ------------------------------------------------------------------
     # 2. Main iteration loop
     # ------------------------------------------------------------------
+    from pathlib import Path as _Path
+    _init_out = _Path(opts.get("path_outputs", ".")) / "python_init.csv"
+    with open(_init_out, "w") as _fh:
+        _fh.write("iteration,level,pressure_Pa,temperature_K\n")
+        for _k in range(atm.n_levels):
+            _fh.write(f"0,{_k},{atm.pressures[_k]:.6e},"
+                      f"{atm.temperatures[_k]:.4f}\n")
+
     for iteration in range(retrieval.n_iterations + 1):
         print(f"\nIteration {iteration}\n____")
         timer.tick("adiabat_pre")
@@ -465,6 +473,11 @@ def run_exorem(input_file: str | Path) -> dict:
                        target.target_gravity)
                    if UPPER_ATM_INFO_WEIGHTING else None)
         temperatures_before = atm.temperatures.copy()
+        # Per-level Jacobian sensitivity (L1-norm of each matrix_t column) on the
+        # finalized matrix the OE step solves — captured BEFORE the retrieval call
+        # since the step consumes/weights matrix_t.  sens→0 = data-empty layer.
+        _jac_sens = (np.abs(matrix_t).sum(axis=0)
+                     if DUMP_RETRIEVAL_TRACE else None)
         retrieval_converged = _temperature_profile_retrieval(
             atm, retrieval, matrix_s, matrix_t,
             rad_diff, rad_noise, dt,
@@ -618,6 +631,12 @@ def run_exorem(input_file: str | Path) -> dict:
         # current suspect, so we need the full mixing ratio table). ---
         _dump_iteration_vmrs(opts.get("path_outputs", "."), iteration,
                               atm, gases_vmr, gases_molar_mass, spec)
+
+        # --- Diagnostic: per-iteration T + Jacobian sensitivity + net flux ---
+        # (retrieval_trace.csv) — the upper-atmosphere over-cooling diagnostic.
+        _dump_retrieval_trace(opts.get("path_outputs", "."), iteration,
+                              atm, _jac_sens, radiosity_internal,
+                              float(radiosity_internal_target[0]))
 
         timer.mark_iteration()
 
@@ -781,6 +800,56 @@ def _dump_iteration_vmrs(path_outputs: str, iteration: int,
         print(f"  Warning: could not dump iteration VMRs: {e}")
 
 
+def _dump_retrieval_trace(path_outputs, iteration: int, atm: Atmosphere,
+                          jac_sens: np.ndarray | None,
+                          radiosity_internal: np.ndarray | None = None,
+                          radiosity_target: float = 0.0) -> None:
+    """Append per-iteration retrieval diagnostics to ``retrieval_trace.csv``.
+
+    Long format, one row per level:
+
+        iteration,level,pressure_Pa,temperature_K,jacobian_sens,net_flux_frac
+
+    ``jacobian_sens`` is the L1-norm of column ``level`` of the temperature
+    Jacobian ``matrix_t`` (computed in the main loop, after the convective
+    coupling is added, on the matrix the optimal-estimation step actually
+    solves).  It measures how much information the OE step has about that
+    level's temperature: ``jacobian_sens → 0`` marks the data-empty,
+    near-singular layers in the optically-thin upper atmosphere where the
+    step is unconstrained.
+
+    ``net_flux_frac`` = radiosity_internal[level] / radiosity_internal_target
+    (target = σT_int⁴, constant).  In equilibrium this is ~1 at every level;
+    a departure is the flux residual the retrieval is trying to null.  Pairing
+    it with ``jacobian_sens`` shows whether a mismatched flux in the thin zone
+    actually has any leverage on temperature — the crux of why the Python's
+    non-grey radiative zone diverges from the Fortran's.
+
+    Iteration 0 creates the file (with header); later iterations append.
+    """
+    if not DUMP_RETRIEVAL_TRACE:
+        return
+    from pathlib import Path
+    out = Path(path_outputs) / "retrieval_trace.csv"
+    mode = "w" if iteration == 0 else "a"
+    n_levels = atm.n_levels
+    sens = jac_sens if jac_sens is not None else np.zeros(n_levels)
+    rad = radiosity_internal if radiosity_internal is not None else np.zeros(n_levels)
+    rtgt = radiosity_target if radiosity_target else 0.0
+    try:
+        with open(out, mode) as fh:
+            if iteration == 0:
+                fh.write("iteration,level,pressure_Pa,temperature_K,"
+                         "jacobian_sens,net_flux_frac\n")
+            for k in range(n_levels):
+                s = float(sens[k]) if k < len(sens) else 0.0
+                nf = (float(rad[k]) / rtgt) if (rtgt and k < len(rad)) else 0.0
+                fh.write(f"{iteration},{k},{atm.pressures[k]:.6e},"
+                         f"{atm.temperatures[k]:.4f},{s:.6e},{nf:.6e}\n")
+    except Exception as e:
+        print(f"  Warning: could not dump retrieval trace: {e}")
+
+
 def _dump_retrieval_debug(path_outputs, iteration: int, atm: Atmosphere,
                            T_old: np.ndarray, dt_proposed: np.ndarray,
                            dt_applied: np.ndarray,
@@ -868,6 +937,13 @@ def _dump_retrieval_debug(path_outputs, iteration: int, atm: Atmosphere,
 # Flip this to True to restore every diagnostic file in one go.
 # ---------------------------------------------------------------------------
 DUMP_DIAGNOSTICS = False
+
+# Per-iteration retrieval trace (T + Jacobian sensitivity per level) written to
+# retrieval_trace.csv.  Lightweight (one CSV, ~n_levels rows/iteration) and
+# independent of DUMP_DIAGNOSTICS, so it can stay on during grid runs to
+# diagnose the optically-thin upper-atmosphere over-cooling (the near-singular
+# OE step: jacobian_sens → 0 marks the data-empty layers).
+DUMP_RETRIEVAL_TRACE = True
 
 
 def _dump_retrieval_matrices(
@@ -1240,6 +1316,41 @@ def _kappa_ir_freedman_approx(T_int: float) -> float:
     if T_int <= 0.0:
         raise ValueError("T_int must be > 0 to estimate κ_IR")
     return 5.0e-4 * (T_int / 500.0) ** 1.8
+
+
+# =====================================================================
+# H2-dissociation correction to the adiabatic gradient (Fortran corr_adia)
+# =====================================================================
+# gas_id() is 0-indexed in the Python port (H=10, H2=11).
+_I_H  = gas_id("H")
+_I_H2 = gas_id("H2")
+_DH0_H2_DISSOC = 230.65e3   # J/mol, H2 dissociation enthalpy (Fortran `dh0`)
+
+
+def _corr_adia(t: float, h2_vmr: float, h_vmr: float) -> tuple[float, float]:
+    """Faithful port of the Fortran ``corr_adia`` (exorem.f90:712-728).
+
+    Returns ``(corr, dcpr)``, the H₂-dissociation correction to the adiabatic
+    gradient.  The Fortran adiabatic gradient is
+
+        gradiant = corr / (c_p/R + dcpr)
+
+    versus the dissociation-free ``1 / (c_p/R)``.  Both ``corr`` (>1) and
+    ``dcpr`` (>0) grow with the atomic-H abundance, so they switch on only in
+    the deep, hot (T >~ 1500 K) zone where H₂ begins to dissociate.  Below that
+    H is essentially all molecular, ``h_vmr -> 0`` and ``(corr, dcpr) -> (1, 0)``
+    so the gradient reduces to ``1/(c_p/R)``.  In the hot deep the net effect is
+    to *shallow* the adiabat (e.g. 0.245 -> 0.199 at 3300 K): ``dcpr`` dominates
+    over ``corr-1`` in the ratio.
+
+    ``h2_vmr`` is the VMR of molecular H₂ and ``h_vmr`` the VMR of atomic H,
+    matching the Fortran call order ``corr_adia(t, gases_vmr(H2), gases_vmr(H))``.
+    """
+    h_abd = max(2.0 * h2_vmr + h_vmr, 1e-300)   # total H nuclei (Fortran max(.,tiny))
+    tdqhdt = 2.0 * h_vmr * h2_vmr * _DH0_H2_DISSOC / (CST_R * t) / (h_abd + h2_vmr)
+    corr = 1.0 + tdqhdt / (2.0 - h_vmr)
+    dcpr = tdqhdt * _DH0_H2_DISSOC / (CST_R * t) / (1.0 - 0.5 * h_vmr)
+    return corr, dcpr
 
 
 def _grad_ad_h2he_approx(T: float) -> float:
@@ -1893,6 +2004,31 @@ def _init_s_matrix(pressures: np.ndarray, retrieval: ExoremRetrieval) -> np.ndar
     return matrix_s
 
 
+# ===========================================================================
+# Faithfulness flags for the retrieval's non-Fortran safety nets
+# ===========================================================================
+# These guards were added to mask instabilities that we now attribute to the
+# missing corr_adia H2-dissociation term in the deep adiabat.  With CORR_ADIA
+# = True the deep is stable grid-wide, so the band-aids may no longer be
+# needed — and the *unconditional* inversion clamp in particular appears to
+# CAUSE the residual upper-atmosphere cold-top: once a dip forms at the
+# (creeping) radiative–convective boundary, T[i] = min(T[i], 1.05*T[i-1])
+# caps every layer above it at 1.05x the over-cooled layer below, ratcheting
+# the column down to the T_MIN floor instead of letting it recover toward the
+# Fortran's cold-but-finite (~170–260 K) radiative equilibrium.
+#
+# Fortran (exorem.f90 L2670-2681) applies this clamp ONLY for iter <= 10.
+#   True  -> faithful: clamp active only during the iter<=10 burn-in.
+#   False -> legacy port behaviour: clamp every iteration.
+INVERSION_CLAMP_BURNIN_ONLY = True
+
+# Fortran has NO per-iteration rate limit (it errors out on T<0 instead).  The
+# port caps |dT| <= RETRIEVAL_MAX_DT_FRAC * T_old every iteration.
+#   float -> cap each layer's step at that fraction of T_old.
+#   None  -> faithful: no rate limit.
+RETRIEVAL_MAX_DT_FRAC = 0.30
+
+
 def _temperature_profile_retrieval(
     atm: Atmosphere,
     retrieval: ExoremRetrieval,
@@ -2053,19 +2189,22 @@ def _temperature_profile_retrieval(
     # *effective* max ratio applied → 1.0 when no layer hit the cap,
     # MAX_DT_FRAC when at least one layer was clipped.
     # ------------------------------------------------------------------
-    MAX_DT_FRAC = 0.30
+    MAX_DT_FRAC = RETRIEVAL_MAX_DT_FRAC
     max_relative_step = float(np.max(np.abs(dt) / np.maximum(T_old, 1.0)))
 
-    max_dt = MAX_DT_FRAC * T_old
-    clipped_any = bool(np.any(np.abs(dt) > max_dt))
-    dt[:] = np.clip(dt, -max_dt, max_dt)
-    beta_clamp = MAX_DT_FRAC if clipped_any else 1.0
+    if MAX_DT_FRAC is not None:
+        max_dt = MAX_DT_FRAC * T_old
+        clipped_any = bool(np.any(np.abs(dt) > max_dt))
+        dt[:] = np.clip(dt, -max_dt, max_dt)
+        beta_clamp = MAX_DT_FRAC if clipped_any else 1.0
 
-    if max_relative_step > MAX_DT_FRAC:
-        n_layers_clipped = int(np.sum(np.abs(dt) >= max_dt - 1e-12))
-        print(f"  Note: per-layer rate limit engaged "
-              f"(proposed max |ΔT|/T = {max_relative_step:.2f} "
-              f"→ {n_layers_clipped} layers clipped to ±{MAX_DT_FRAC*100:.0f}% T_old).")
+        if max_relative_step > MAX_DT_FRAC:
+            n_layers_clipped = int(np.sum(np.abs(dt) >= max_dt - 1e-12))
+            print(f"  Note: per-layer rate limit engaged "
+                  f"(proposed max |ΔT|/T = {max_relative_step:.2f} "
+                  f"→ {n_layers_clipped} layers clipped to ±{MAX_DT_FRAC*100:.0f}% T_old).")
+    else:
+        beta_clamp = 1.0   # rate limit disabled (faithful) — no clipping
 
     T_proposed = T_old + dt
 
@@ -2111,7 +2250,21 @@ def _temperature_profile_retrieval(
     # Early convergence
     temperature_variation = float(np.max(np.abs(dt) / atm.temperatures))
     converged = False
+    # Faithful port of the Fortran's two-branch test (exorem.f90 2662-2667):
+    #   * converged DURING the pure-radiative burn-in  -> shorten it so the
+    #     adiabat engages on the very next iteration;
+    #   * converged AFTER the burn-in                   -> declare convergence.
+    # The Python previously had only the second branch, so it always ran the
+    # full fixed burn-in.  For some (T_int, g) the pure-radiative phase then
+    # over-runs and diverges (deep collapses to the opacity-table floor ~100 K,
+    # top runs away to thousands of K) before convection can stabilise it —
+    # the grid's catastrophic cells.  Engaging the adiabat as soon as the
+    # radiative phase settles prevents that.
     if (solution_deviation <= retrieval.retrieval_tolerance
+            and iteration < retrieval.n_non_adiabatic_iterations
+            and temperature_variation <= retrieval.retrieval_tolerance):
+        retrieval.n_non_adiabatic_iterations = iteration + 1
+    elif (solution_deviation <= retrieval.retrieval_tolerance
             and iteration > retrieval.n_non_adiabatic_iterations
             and temperature_variation <= retrieval.retrieval_tolerance):
         converged = True
@@ -2163,11 +2316,30 @@ def _temperature_profile_retrieval(
     # exists to redistribute heat physically), then switches off.
     #
     # Fortran hard-codes the window as `iter <= 10`.  We gate it on the full
-    # pre-convective burn-in (`iteration <= n_non_adiabatic_iterations`, =15 by
-    # default), which is strictly safer and matches the r33 rationale; to
-    # reproduce the reference bit-for-bit, replace the condition with
-    # `iteration <= 10`.
-    if iteration <= retrieval.n_non_adiabatic_iterations:
+    # GRID EVIDENCE (full T_int×g×Met sweep): the hot-bubble runaway this clamp
+    # guards against happens AFTER the burn-in, not during it.  The r33/r48
+    # rationale gated the clamp to the burn-in on the assumption that "the
+    # convective coupling provides the right physics afterwards" — but that
+    # coupling only exists in the deep CONVECTIVE zone.  The optically-thin
+    # upper atmosphere is radiative with no convective coupling, so once the
+    # clamp switches off the near-singular optimal-estimation step (dF/dT→0,
+    # ΔT~10³–10⁴ K, positive every iteration) heats the top unchecked; in the
+    # worst (low-g, low-T_int) cells the inversion propagates down and collapses
+    # the deep onto the opacity-table floor (~100 K) — the grid's catastrophic
+    # cells.  The clamp is INACTIVE at the converged fixed point (the true
+    # gentle upper inversion is ~1.8 %/level, well under 5 %), and inactive in
+    # the deep convective zone (T_above < T_below by construction), so leaving
+    # it on for every iteration does not distort healthy profiles — it only
+    # caps the pathological inter-layer inversion.  (The Fortran's retrieval is
+    # better-conditioned in the thin upper layers and does not need the clamp
+    # past iter≤10; this port's does, so we keep the guard on throughout.)
+    #
+    # FAITHFULNESS GATE (added with the corr_adia deep-adiabat fix): the
+    # Fortran applies this clamp only for iter <= 10.  With the deep now stable
+    # the unconditional form appears to drive the upper-atmosphere cold-top, so
+    # INVERSION_CLAMP_BURNIN_ONLY=True restores the Fortran's iter<=10 window.
+    apply_clamp = (iteration <= 10) if INVERSION_CLAMP_BURNIN_ONLY else True
+    if apply_clamp:
         for i in range(1, n_levels):
             atm.temperatures[i] = min(atm.temperatures[i],
                                       1.05 * atm.temperatures[i - 1])
@@ -2529,6 +2701,52 @@ TAU_INFO = 0.3        # grey-Rosseland optical depth at the OE/prior crossover.
 APRIORI_RELAX = 0.5   # relaxation rate of the optically-thin zone toward the
                       # a-priori (per iteration); 0.5 ≈ a 2-iteration timescale.
 
+# --- Convection optical-depth gate -----------------------------------------
+# The Fortran's converged upper atmosphere is comfortably sub-adiabatic, so its
+# add_convective_term (which fires on EVERY super-adiabatic interface, no margin,
+# no contiguity) produces flux_conv = 0 above the photosphere.  The Python's
+# retrieval, by contrast, transiently drives the optically-thin upper atmosphere
+# super-adiabatic; the UNCAPPED conv_add = 1e3·total_flux·(gr/grad_ad − 1)² then
+# self-reinforces (conv_add inflates radiosity_internal → retrieval cools to null
+# it → steeper lapse → larger excess → larger conv_add), collapsing the upper
+# atmosphere to the T_MIN floor (verified on T500/g26/M1: spurious flux_conv up
+# to 1.57e4 W/m² at ~1e-3 bar where the Fortran is exactly 0).
+#
+# This is the runaway the r39 contiguity filter suppressed and the r40 reversion
+# re-admitted.  Neither setting is right: r39 (contiguous-from-bottom) ALSO kills
+# the *real* detached convective zone the Fortran has at ~2.8–0.07 bar (that is
+# why it excluded L28); r40 restores that zone but re-admits the spurious one.
+# The correct discriminator is not contiguity but OPTICAL DEPTH: real convective
+# zones (deep + detached) sit at grey-Rosseland tau ≳ 0.1; the spurious runaway
+# lives at tau ≪ 0.1, where the medium is transparent and convection is
+# unphysical (Marley & McKay 1999; Hubeny & Mihalas 2014 §17.4 place the top of
+# the convective zone at the photosphere region).  We therefore fire the
+# convective coupling only where the (monotonic, photosphere-calibrated) grey
+# tau at the interface's shallower (upper) boundary exceeds CONV_TAU_MIN.
+#
+# CAVEAT: CONV_TAU_MIN was calibrated on T500/g26/M1, where the real zone bottoms
+# at tau(L30)=0.17 and the spurious zone tops at tau(L33)=0.086 — a clean gap.
+# The grey tau adapts to T_int (κ∝T^1.8) and g, so this *should* generalise, but
+# the threshold MUST be validated across the grid.  This gate matches the
+# Fortran's *result* (flux_conv=0 in the thin zone); it does not address *why*
+# the Python's thin zone goes super-adiabatic (the upstream seed — likely the
+# iter-1 flux overshoot / the Tikhonov ridge perturbing the first step — remains
+# open and is the truly faithful fix).
+CONV_TAU_GATE = True   # gate convection on grey optical depth (kills thin-zone runaway)
+CONV_TAU_MIN  = 0.1    # min grey-Rosseland tau (lower interface boundary) for convection
+
+# --- Adiabatic-gradient H2-dissociation correction (Fortran corr_adia) -----
+# The Fortran adiabatic gradient is gradiant = corr/(c_p/R + dcpr) with corr,
+# dcpr from corr_adia() — the H2-dissociation correction (exorem.f90:712).  The
+# Python port historically used the dissociation-free 1/(c_p/R), which is up to
+# ~17% too steep in the deep hot zone (T >~ 2500 K, worst at low g / high
+# T_int where the deep is hottest).  A too-steep deep adiabat both over-steepens
+# the projected adiabat in _init_adiabat and raises the Schwarzschild trigger
+# threshold (gr > grad_ad) in _add_convective_term, fragmenting/destabilising
+# the deep convective zone.  True = faithful Fortran gradient (default).
+# False = old dissociation-free gradient, for A/B testing.
+CORR_ADIA = True
+
 # --- Retrieval matrix conditioning -----------------------------------------
 # The Fortran reference (exorem.f90 L2601-2618) inverts the bare observation
 # covariance  M = K·S·Kᵀ + diag(rad_noise²)  with NO Tikhonov ridge.  The ridge
@@ -2681,12 +2899,25 @@ def _init_adiabat(
     if verbose:
         print("  Setting adiabatic gradient below upper adiabatic level")
 
-    def _grad_ad_at(idx_deep: int, idx_shallow: int) -> float:
+    def _grad_ad_at(idx_deep: int, idx_shallow: int,
+                    corr_layer: Optional[int] = None) -> float:
         t_lay = math.sqrt(atm.temperatures[idx_deep] * atm.temperatures[idx_shallow])
         lay_j = min(idx_deep, n_layers - 1)
         cpr = sum(gases_vmr[k, lay_j]
                   * interp_ex_0d(t_lay, temperatures_thermo, gases_c_p[k, :])
                   for k in range(N_GASES)) / CST_R
+        if CORR_ADIA:
+            # Fortran init_adiabat (exorem.f90:1000-1004): gradiant = corr/(c_p/R
+            # + dcpr).  In the main scan corr_adia uses the H2/H VMR at layer i
+            # (1-indexed) = idx_shallow (0-indexed); at the deepest interface
+            # (exorem.f90:1036-1038) it uses layer 1 (1-indexed) = idx_deep=0.
+            lc = idx_shallow if corr_layer is None else corr_layer
+            lc = min(lc, n_layers - 1)
+            corr, dcpr = _corr_adia(t_lay,
+                                    gases_vmr[_I_H2, lc],
+                                    gases_vmr[_I_H,  lc])
+            denom = cpr + dcpr
+            return (corr / denom) if denom > 0 else 0.0
         return (1.0 / cpr) if cpr > 0 else 0.0
 
     level_max_adiabat = -1     # index of the RCB (top of the convective zone)
@@ -2715,7 +2946,7 @@ def _init_adiabat(
     if atm.pressures[0] != atm.pressures[1]:
         log_dp0 = math.log(atm.pressures[0] / atm.pressures[1])
         gr0 = math.log(atm.temperatures[0] / atm.temperatures[1]) / log_dp0
-        grad_ad0 = _grad_ad_at(0, 1)
+        grad_ad0 = _grad_ad_at(0, 1, corr_layer=0)
         grad_target0 = grad_ad0 + DGRAD
         if grad_ad0 > 0.0 and gr0 > grad_target0:
             if level_max_adiabat < 0:
@@ -3336,12 +3567,55 @@ def _add_convective_term(
         cpr_j = sum(gases_vmr[k, lay_j]
                     * interp_ex_0d(t_lay, temperatures_thermo, gases_c_p[k, :])
                     for k in range(N_GASES)) / CST_R
-        grad_ad_arr[j] = 1.0 / cpr_j if cpr_j > 0 else 0.0
+        if CORR_ADIA:
+            # Fortran exorem.f90:374-378: gradiant = corr/(c_p/R + dcpr), with
+            # corr_adia taking the H2/H VMR at layer min(j, n_layers) (1-indexed)
+            # = min(j, n_layers-1) (0-indexed) — one layer shallower than the
+            # c_p layer (j-1).  Replicates the Fortran's layer-index offset.
+            lay_c = min(j, n_layers - 1)
+            corr, dcpr = _corr_adia(t_lay,
+                                    gases_vmr[_I_H2, lay_c],
+                                    gases_vmr[_I_H,  lay_c])
+            denom = cpr_j + dcpr
+            grad_ad_arr[j] = corr / denom if denom > 0 else 0.0
+        else:
+            grad_ad_arr[j] = 1.0 / cpr_j if cpr_j > 0 else 0.0
 
     # Fortran-equivalent: every super-adiabatic interface gets conv coupling.
     for j in range(1, n_levels):
         if grad_ad_arr[j] > 0 and gr_arr[j] > grad_ad_arr[j]:
             is_conv_interface[j] = True
+
+    # --- Optical-depth gate (see CONV_TAU_GATE block at module level) ---------
+    # Suppress convection where the medium is optically thin: the spurious
+    # thin-zone runaway lives at grey tau << 0.1, while the real deep + detached
+    # convective zones sit at tau >~ 0.1.  An interface reaches into the thin
+    # zone when its SHALLOWER (upper, level-j) boundary is optically thin, so we
+    # gate on tau[j] — the smaller of the two boundary taus (monotonic tau ⇒
+    # tau[j-1] ≥ tau[j]).  Gating on the deeper boundary tau[j-1] instead is too
+    # lenient: it keeps interfaces that straddle the photosphere (deep boundary
+    # thick, top thin), which on the full grid is exactly where the catastrophic
+    # spurious spikes sit (e.g. T1000/g50/M0: 6e6 W/m²; T700/g25/M0: 2.5e5 W/m²,
+    # both at interfaces whose upper boundary is thin but whose base is not).
+    # Validated against the Fortran convective zones across the noirr grid: tau[j]
+    # < 0.1 suppresses only Fortran-radiative interfaces in every cell except a
+    # single small (≤90 W/m²) interface at the top of T400/g50/M1's real zone,
+    # which extends anomalously to tau≈0.06 — acceptable collateral.
+    if CONV_TAU_GATE and is_conv_interface.any():
+        tau_grey = _representative_optical_depth(
+            atm.pressures,
+            target.target_internal_temperature,
+            target.target_gravity)
+        n_gated = 0
+        for j in range(1, n_levels):
+            if is_conv_interface[j] and tau_grey[j] < CONV_TAU_MIN:
+                is_conv_interface[j] = False
+                n_gated += 1
+        if n_gated > 0:
+            _it = getattr(retrieval, "_current_iteration", -1) if retrieval is not None else -1
+            print(f"  Conv tau-gate: suppressed {n_gated} optically-thin "
+                  f"super-adiabatic interface(s) (tau < {CONV_TAU_MIN:g}).")
+
 
     # Track the deepest convective interface for the bottom-boundary special case.
     gr      = 0.0
