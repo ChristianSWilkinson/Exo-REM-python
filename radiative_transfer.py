@@ -376,12 +376,10 @@ def calculate_radiative_transfer(
                     if n_wn_active < n_wavenumbers:
                         dtau[:ng[0], n_wn_active:] = 0.0
                 elif n_k_samples_max > 1:
-                    # Vectorised across all active wavenumbers (see
-                    # _combine_k_distributions_batched). Supersedes the
-                    # per-wavenumber njit path; bit-equivalent (rel<2e-15).
-                    _combine_k_distributions_batched(
-                        dtau, dtauk, ng_ik,
-                        indg, fracg, samples_k, weights_k, n_wn_active)
+                    for i in range(n_wn_active):
+                        _combine_k_distributions(
+                            dtau, dtauk, ng_ik, n_k_samples_max,
+                            indg, fracg, samples_k, weights_k, i)
                 else:
                     dtau[0, :n_wn_active] += dtauk[0, :n_wn_active]
 
@@ -977,9 +975,6 @@ def _combine_k_distributions(
     samples_k: np.ndarray,
     weights_k: np.ndarray,
     i_wn: int,             # wavenumber index
-    wmix: np.ndarray,      # scratch (ng_ik*ng_ik,) — reused across wavenumbers
-    dtausum: np.ndarray,   # scratch (ng_ik*ng_ik,)
-    wmix_cum: np.ndarray,  # scratch (ng_ik*ng_ik,)
 ) -> None:
     """
     Combine two k-distributions at wavenumber index *i_wn* using the
@@ -1012,9 +1007,8 @@ def _combine_k_distributions(
 
     # Full random-overlap resampling
     n_combined = ng_ik * ng_ik
-    # wmix / dtausum / wmix_cum are passed in as reusable scratch (sized
-    # ng_ik*ng_ik by _combine_k_distributions_all_wn) so they are not
-    # re-allocated for every wavenumber.
+    wmix    = np.empty(n_combined)
+    dtausum = np.empty(n_combined)
     k = 0
     for ig1 in range(ng_ik):
         for ig2 in range(ng_ik):
@@ -1028,7 +1022,8 @@ def _combine_k_distributions(
     dtausum_s = dtausum[order]
     wmix_s    = wmix[order]
 
-    # Cumulative weights (wmix_cum is reused scratch — see signature)
+    # Cumulative weights
+    wmix_cum = np.empty(n_combined)
     s = 0.0
     for k in range(n_combined):
         s += wmix_s[k]
@@ -1060,113 +1055,3 @@ def _combine_k_distributions(
             else:
                 log_tau = y0
         dtau[ig, i_wn] = math.exp(log_tau)
-
-
-@njit(cache=True, fastmath=True)
-def _combine_k_distributions_all_wn(
-    dtau: np.ndarray,      # (n_k_samples_max, n_wavenumbers) — updated in-place
-    dtauk: np.ndarray,     # (n_k_samples_max, n_wavenumbers) — new species
-    ng_ik: int,
-    n_k_samples_max: int,
-    indg: int,
-    fracg: float,
-    samples_k: np.ndarray,
-    weights_k: np.ndarray,
-    n_wn_active: int,
-) -> None:
-    """Combine one species' k-distribution into ``dtau`` for ALL active
-    wavenumbers in a single njit call.
-
-    PERF: the caller used to run ``for i in range(n_wn_active):
-    _combine_k_distributions(...)`` from Python, crossing the Python->Numba
-    boundary once per wavenumber (~90k crossings per RT step) and re-allocating
-    three scratch arrays each time.  Lowering the wavenumber loop into njit
-    leaves a single boundary crossing per (layer, species) and reuses the
-    scratch buffers across wavenumbers.  Bit-for-bit identical to the previous
-    per-wavenumber calls (same algorithm, same order).
-    """
-    n_combined = ng_ik * ng_ik
-    wmix     = np.empty(n_combined)
-    dtausum  = np.empty(n_combined)
-    wmix_cum = np.empty(n_combined)
-    for i in range(n_wn_active):
-        _combine_k_distributions(
-            dtau, dtauk, ng_ik, n_k_samples_max,
-            indg, fracg, samples_k, weights_k, i,
-            wmix, dtausum, wmix_cum)
-
-
-def _combine_k_distributions_batched(
-    dtau: np.ndarray,      # (n_k_samples_max, n_wavenumbers) — updated in-place
-    dtauk: np.ndarray,     # (n_k_samples_max, n_wavenumbers) — new species
-    ng_ik: int,
-    indg: int,
-    fracg: float,
-    samples_k: np.ndarray,
-    weights_k: np.ndarray,
-    n_wn_active: int,
-) -> None:
-    """Vectorised replacement for the per-wavenumber combine loop.
-
-    Combines one species' k-distribution into the running ``dtau`` for ALL
-    active wavenumbers at once (single batched argsort over the ng^2 axis
-    instead of n_wn separate ng^2 sorts).  Pure NumPy — NOT njit — so it is
-    called once per (layer, species) from ``calculate_radiative_transfer``.
-
-    Verified bit-equivalent (rel err < 2e-15) to the original scalar
-    ``_combine_k_distributions`` across ng in {8,16,20}, n_wn in {1,7,151},
-    and the g-dominates / k-dominates / tiny-value / mixed regimes.  This is
-    also the natural precursor to a GPU port (the batched form maps directly
-    onto tf/jax).
-    """
-    n_combined = ng_ik * ng_ik
-    g  = dtau[:ng_ik, :n_wn_active]
-    kk = dtauk[:ng_ik, :n_wn_active]
-
-    # log-interpolated medians at (indg, fracg), per wavenumber
-    def _logmed(arr):
-        a = arr[indg, :n_wn_active]; b = arr[indg + 1, :n_wn_active]
-        lin = fracg * a + (1.0 - fracg) * b
-        sa = np.where(a > 1e-40, a, 1.0); sb = np.where(b > 1e-40, b, 1.0)
-        logv = np.exp(fracg * np.log(sa) + (1.0 - fracg) * np.log(sb))
-        return np.where((a <= 1e-40) | (b <= 1e-40), lin, logv)
-
-    amedg = _logmed(dtau); amedk = _logmed(dtauk)
-    last = ng_ik - 1
-    mask_g = (amedg <= amedk * 1e-2) & (dtau[last, :n_wn_active] <= 1e-2 * dtauk[last, :n_wn_active])
-    mask_k = ((amedk <= amedg * 1e-2) & (dtauk[last, :n_wn_active] <= 1e-2 * dtau[last, :n_wn_active])
-              & (~mask_g))
-
-    # full random-overlap resampling, vectorised over all active wavenumbers
-    val = (g[:, None, :] + kk[None, :, :]).reshape(n_combined, n_wn_active)
-    dtausum = np.log(np.maximum(val, 1e-40))
-    wmix = (weights_k[:ng_ik, None] * weights_k[None, :ng_ik]).reshape(n_combined)
-    order = np.argsort(dtausum, axis=0, kind="stable")
-    dtausum_s = np.take_along_axis(dtausum, order, axis=0)
-    wmix_s = wmix[order]
-    wmix_cum = np.cumsum(wmix_s, axis=0)
-
-    out_full = np.empty((ng_ik, n_wn_active))
-    for ig in range(ng_ik):
-        x = samples_k[ig]
-        idx = np.sum(wmix_cum < x, axis=0)             # == searchsorted(side='left') per column
-        idx_c = np.clip(idx, 1, n_combined - 1)
-        x1 = np.take_along_axis(wmix_cum,  idx_c[None, :],       0)[0]
-        x0 = np.take_along_axis(wmix_cum, (idx_c - 1)[None, :],  0)[0]
-        y1 = np.take_along_axis(dtausum_s, idx_c[None, :],       0)[0]
-        y0 = np.take_along_axis(dtausum_s, (idx_c - 1)[None, :], 0)[0]
-        dd = x1 - x0
-        interp = np.where(dd > 0, y0 + (y1 - y0) * (x - x0) / np.where(dd > 0, dd, 1.0), y0)
-        # linear extrapolation outside the support (matches math_utils.interp_ex)
-        ddL = wmix_cum[1, :] - wmix_cum[0, :]
-        sL  = np.where(ddL != 0, (dtausum_s[1, :] - dtausum_s[0, :]) / np.where(ddL != 0, ddL, 1.0), 0.0)
-        leftv = dtausum_s[0, :] + sL * (x - wmix_cum[0, :])
-        ddR = wmix_cum[-1, :] - wmix_cum[-2, :]
-        sR  = np.where(ddR != 0, (dtausum_s[-1, :] - dtausum_s[-2, :]) / np.where(ddR != 0, ddR, 1.0), 0.0)
-        rightv = dtausum_s[-1, :] + sR * (x - wmix_cum[-1, :])
-        log_tau = np.where(idx <= 0, leftv, np.where(idx >= n_combined, rightv, interp))
-        out_full[ig, :] = np.exp(log_tau)
-
-    out = np.where(mask_g[None, :], kk + amedg[None, :],
-                   np.where(mask_k[None, :], g + amedk[None, :], out_full))
-    dtau[:ng_ik, :n_wn_active] = out

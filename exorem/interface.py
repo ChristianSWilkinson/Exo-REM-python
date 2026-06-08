@@ -492,6 +492,7 @@ def build_stellar_irradiance(
     wavenumber_step: float,
     light: LightSource,
     spectrum_file: str = "None",
+    use_irradiation: bool = False,
 ) -> np.ndarray:
     """
     Build the stellar irradiance array on the model wavenumber grid.
@@ -507,6 +508,27 @@ def build_stellar_irradiance(
     from .physics import planck_function, spherical_black_body_spectral_radiance
 
     n_wn = len(wavenumbers)
+
+    # --- Source range / irradiation coupling -------------------------------
+    # Faithful port of the Fortran `get_stellar_spectrum`, `if(use_irradiation)`
+    # block (exorem.f90 ~2413-2423).  When use_irradiation is on, the source
+    # *range* is NOT the template value; it is derived so that the integrated
+    # black-body irradiance equals the scalar light.irradiation (the harness
+    # sets light.irradiation = 4*sigma*T_irr^4 for irradiated cells).  The
+    # Fortran overwrites its module-level light_source_range here; we mirror
+    # that by writing the derived value back onto `light.range` (nothing
+    # downstream reads it before this point, and the black-body construction
+    # below already uses light.range).  The summation order matches the Fortran
+    # do-loop exactly (first term uses wavenumbers[0] as the width, then the
+    # successive wavenumber steps), so the result is bit-faithful.
+    if (use_irradiation and light.irradiation > 0.0
+            and light.effective_temperature > 0.0):
+        sum_black_body = (planck_function(wavenumbers[0], light.effective_temperature)
+                          * wavenumbers[0])
+        for i in range(1, n_wn):
+            sum_black_body += (planck_function(wavenumbers[i], light.effective_temperature)
+                               * (wavenumbers[i] - wavenumbers[i - 1]))
+        light.range = light.radius * (light.irradiation / (sum_black_body * PI)) ** (-0.5)
 
     # --- Black-body irradiance ---
     irradiance = np.array([

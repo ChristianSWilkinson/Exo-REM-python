@@ -1082,8 +1082,7 @@ def _init_exorem(input_file: str | Path) -> dict:
     if opts.get("add_light_source", False):
         light.irradiance = build_stellar_irradiance(
             spectrometrics.wavenumbers, spectrometrics.wavenumber_step, light,
-            opts["light_source_spectrum_file"],
-            use_irradiation=opts.get("use_irradiation", False))
+            opts["light_source_spectrum_file"])
     else:
         print("  add_light_source = False → stellar irradiance set to zero "
               "(no irradiation)")
@@ -1874,51 +1873,27 @@ def _do_radiative_transfer(
     target = state["target"]
     n_species = spec.n_species
 
-    # Pad tables to uniform shapes.
-    #
-    # PERF: these padded arrays (in particular the 5-D ``kcoeff_pad``) depend
-    # ONLY on the k-coefficient tables, which are loaded once and never change
-    # across the equilibrium iterations.  Building them here on EVERY RT call
-    # allocated and filled a multi-hundred-MB array ~1000× per run (it showed
-    # up as the ~67 s gap between the ``rt_clear`` phase total and the
-    # instrumented RT-internal total).  Build once, then reuse from a cache
-    # stashed on the tables dict.  Pure refactor — the arrays are bit-identical
-    # to before, so ``tau``/outputs are unchanged.
-    _pad = tables.get("_padded_cache")
-    if _pad is None:
-        ng_max  = int(tables["ng_max"])
-        n_wn_max = max(tables["n_k_wavenumbers"])
-        n_p_max  = max(tables["n_k_pressures"])
-        n_t_max  = max(tables["n_k_temperatures"])
-        n_sp     = n_species
+    # Pad tables to uniform shapes
+    ng_max  = int(tables["ng_max"])
+    n_wn_max = max(tables["n_k_wavenumbers"])
+    n_p_max  = max(tables["n_k_pressures"])
+    n_t_max  = max(tables["n_k_temperatures"])
+    n_sp     = n_species
 
-        wavenumbers_k_pad = np.zeros((n_wn_max, n_sp))
-        p_k_pad           = np.zeros((n_p_max, n_sp))
-        t_k_pad           = np.zeros((n_t_max, n_p_max, n_sp))
-        kcoeff_pad        = np.zeros((ng_max, n_wn_max, n_t_max, n_p_max, n_sp))
+    wavenumbers_k_pad = np.zeros((n_wn_max, n_sp))
+    p_k_pad           = np.zeros((n_p_max, n_sp))
+    t_k_pad           = np.zeros((n_t_max, n_p_max, n_sp))
+    kcoeff_pad        = np.zeros((ng_max, n_wn_max, n_t_max, n_p_max, n_sp))
 
-        for i in range(n_sp):
-            nwk = tables["n_k_wavenumbers"][i]
-            npk = tables["n_k_pressures"][i]
-            ntk = tables["n_k_temperatures"][i]
-            ng_i = tables["ng"][i]
-            wavenumbers_k_pad[:nwk, i] = tables["wavenumbers_k"][i]
-            p_k_pad[:npk, i]           = tables["p_k_species"][i]
-            t_k_pad[:ntk, :npk, i]    = tables["t_k_species"][i][:ntk, :npk] if tables["t_k_species"][i].ndim >= 2 else tables["t_k_species"][i][:ntk, np.newaxis]
-            kcoeff_pad[:ng_i, :nwk, :ntk, :npk, i] = tables["kcoeff_species"][i][:ng_i, :nwk, :ntk, :npk]
-
-        _pad = {
-            "wavenumbers_k_pad": wavenumbers_k_pad,
-            "p_k_pad": p_k_pad,
-            "t_k_pad": t_k_pad,
-            "kcoeff_pad": kcoeff_pad,
-        }
-        tables["_padded_cache"] = _pad
-
-    wavenumbers_k_pad = _pad["wavenumbers_k_pad"]
-    p_k_pad           = _pad["p_k_pad"]
-    t_k_pad           = _pad["t_k_pad"]
-    kcoeff_pad        = _pad["kcoeff_pad"]
+    for i in range(n_sp):
+        nwk = tables["n_k_wavenumbers"][i]
+        npk = tables["n_k_pressures"][i]
+        ntk = tables["n_k_temperatures"][i]
+        ng_i = tables["ng"][i]
+        wavenumbers_k_pad[:nwk, i] = tables["wavenumbers_k"][i]
+        p_k_pad[:npk, i]           = tables["p_k_species"][i]
+        t_k_pad[:ntk, :npk, i]    = tables["t_k_species"][i][:ntk, :npk] if tables["t_k_species"][i].ndim >= 2 else tables["t_k_species"][i][:ntk, np.newaxis]
+        kcoeff_pad[:ng_i, :nwk, :ntk, :npk, i] = tables["kcoeff_species"][i][:ng_i, :nwk, :ntk, :npk]
 
     # Cloud arrays
     if n_clouds_active > 0:

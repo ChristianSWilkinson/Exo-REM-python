@@ -1864,21 +1864,81 @@ def _calculate_fe_ni_co(
     t, p, ip, vmr, gases_delta_g_i, condensates_delta_g_i,
     is_condensed, vmr_sat, layer_cond, pressures_layers, temperatures_layers
 ):
-    """Fe condensation."""
-    idx_fe = gas_id("Fe")
+    """Fe / FeH equilibrium + Fe condensation.
+
+    Faithful port of the Fortran ``calculate_fe_ni_co_equilibrium``
+    (chemistry.f90 1202-1263).  The previous version did only the Fe
+    condensation cap and never touched FeH, so FeH stayed at its zero
+    initialisation at every level.  This adds the three pieces needed to
+    reproduce the Fortran FeH profile:
+
+      1. FeH/Fe ratio (Visscher et al. 2010, 2Fe + H2 -> 2FeH):
+             rfeh = 10**(-1.85 - 1905/T) * sqrt(p_bar * qH2)
+         with FeH = Fe * rfeh, and atomic Fe drawn into FeH via
+         Fe[ip] = Fe[ip-1] / (1 + rfeh).  On entry vmr[idx_fe] already holds
+         the layer-below value (carried forward at calculate_chemistry:399);
+         at the deepest layer it is the elemental Fe abundance, matching the
+         Fortran's Fe[1] = Fe[1] / (1 + rfeh).
+
+      2. The Fe(g)->Fe(s) saturation written with the Fortran's sign,
+             qsat = exp(+(g_cond - g_gas)*1e3/RT) / p_bar
+         (= 1/(K_eq * p) under the standard Gibbs convention used by
+         equilibrium_constant_gases; the old code used K_eq/p, the reciprocal).
+         Above the Fe cloud this is what drives atomic Fe -- and hence FeH --
+         down steeply: the Fortran FeH falls ~22 dex deep->top, of which only
+         ~6 dex is rfeh; the rest is Fe tracking this saturation.
+
+      3. The cap is applied at EVERY layer where Fe >= qsat (matching the
+         Fortran), not only at the first condensation level -- the old code
+         capped once and then froze Fe at the cloud-base value.
+
+    Pressure: ``p_bar = p * 1e-2`` is the *true* bar (p = pressures_layers*1e-3
+    with pressures_layers in Pa, so bar = p*1e-2 = pressures_layers*1e-5).  This
+    matches the Fortran's ``p`` and the already-corrected gas-phase routines
+    (_equil_co_si_o, _calculate_nh3_n2_hcn).  NB the other condensation routines
+    (_calculate_cr, _calculate_cl_na_k, _calculate_p) still use the legacy
+    ``p*1e-3`` = bar/10 and carry the same 10x pressure error -- to be fixed in
+    their own installments.
+
+    Ni/Co alloy formation and the interpolated cloud-base (pcfe/tc) bookkeeping
+    in the Fortran are not reproduced: neither feeds back into gas-phase Fe or
+    FeH, so they are out of scope here (and were already absent before).
+    """
+    idx_fe  = gas_id("Fe")
+    idx_feh = gas_id("FeH")
+    idx_h2  = gas_id("H2")
     cond_fe = condensate_id("Fe")
     dg_fe_cond = condensates_delta_g_i[cond_fe]
     dg_fe_gas  = gases_delta_g_i[idx_fe]
 
-    p_bar = p * 1e-3
-    k_fe = _safe_exp(-(dg_fe_cond - dg_fe_gas) * 1e3 / (CST_R * t)) if t > 0 else 0.0
-    qsat_fe = k_fe / p_bar if p_bar > 0 else 0.0
+    p_bar = p * 1e-2                      # true bar (= pressures_layers*1e-5)
+    qh2   = vmr[idx_h2] if vmr[idx_h2] > 0 else 0.0
+
+    # FeH/Fe ratio -- Visscher et al. (2010), 2Fe + H2 -> 2FeH
+    if t > 0 and p_bar > 0:
+        rfeh = (10.0 ** (-1.85 - 1.905e3 / t)) * math.sqrt(p_bar * qh2)
+    else:
+        rfeh = 0.0
+
+    # Atomic Fe drawn down into FeH (Fortran: Fe[ip] = Fe[ip-1] / (1 + rfeh)).
+    vmr[idx_fe] = vmr[idx_fe] / (1.0 + rfeh)
+
+    # Fe(g) -> Fe(s) saturation, Fortran sign (= 1/(K_eq * p)).
+    if t > 0 and p_bar > 0:
+        qsat_fe = _safe_exp((dg_fe_cond - dg_fe_gas) * 1e3 / (CST_R * t)) / p_bar
+    else:
+        qsat_fe = 0.0
     vmr_sat[cond_fe] = qsat_fe
 
-    if vmr[idx_fe] > qsat_fe and not is_condensed[cond_fe]:
+    if vmr[idx_fe] >= qsat_fe and not is_condensed[cond_fe]:
         is_condensed[cond_fe] = True
         layer_cond[cond_fe] = ip
+
+    if vmr[idx_fe] >= qsat_fe:
         vmr[idx_fe] = max(qsat_fe, 0.0)
+
+    # FeH = Fe * rfeh  (both Fortran branches).
+    vmr[idx_feh] = max(vmr[idx_fe] * rfeh, 0.0)
 
     return vmr
 
