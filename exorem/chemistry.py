@@ -571,9 +571,10 @@ def calculate_chemistry(
             vmr_sat_condensates[:, ip], layer_condensates,
             pressures_layers, temperatures_layers)
 
-        # -- PH₃ --
+        # -- PH₃ / P / P₂ / PH₂ / PO --
         gases_vmr[:, ip] = _calculate_p(
-            t, p, ip, gases_vmr[:, ip], gases_delta_g_i)
+            t, p, ip, gases_vmr[:, ip], gases_delta_g_i,
+            condensates_delta_g_i, is_condensed, gas_element_abd, at_equilibrium)
 
         # Update elemental abundances from VMR
         _update_gas_element_abd(gases_vmr[:, ip], gas_element_abd[:, ip],
@@ -1687,15 +1688,17 @@ def _calculate_cl_na_k(
         capped and atomic K = KCl/(k_kcl·HCl) is dragged down with it.
 
     Element budgets from ``gas_element_abd`` (rained-out, carried upward);
-    ``p_bar=p·1e-3`` for consistency with the rest of the module.  NH4Cl
-    condensation (T≲200 K) is omitted — secondary for this case.
+    ``p_bar=p·1e-2`` = true bar (= pressures_layers·1e-5), matching the Fortran's
+    pressure in k_eq (FIXED: was p·1e-3 = bar/10, a 10x under-pressure that left
+    K/Na under-condensed aloft).  NH4Cl condensation (T≲200 K) and the
+    gas_element_abd rain-out write-back remain to be added — secondary here.
     """
     iNa  = gas_id("Na");  iK   = gas_id("K");   iNaCl = gas_id("NaCl")
     iKCl = gas_id("KCl"); iHCl = gas_id("HCl"); iH2S  = gas_id("H2S")
     iH2  = gas_id("H2")
     cNa2S = condensate_id("Na2S"); cKCl = condensate_id("KCl")
 
-    p_bar = p * 1e-3
+    p_bar = p * 1e-2   # true bar = pressures_layers*1e-5 ; legacy p*1e-3 was bar/10
     qh2   = vmr[iH2] if vmr[iH2] > 0 else 1.0
 
     # element totals (Z-1): Na=10, K=18, Cl=16, S=15
@@ -1799,7 +1802,7 @@ def _calculate_al_o(
     dg_al    = gases_delta_g_i[idx_al]
     dg_h2o   = gases_delta_g_i[gas_id("H2O")]
 
-    p_bar = p * 1e-3
+    p_bar = p * 1e-2   # true bar = pressures_layers*1e-5 ; legacy p*1e-3 was bar/10
     qh2   = vmr[gas_id("H2")]
     qh2o  = vmr[gas_id("H2O")]
 
@@ -1847,7 +1850,7 @@ def _calculate_cr(
     dg_cr_cond = condensates_delta_g_i[cond_cr]
     dg_cr_gas  = gases_delta_g_i[idx_cr]
 
-    p_bar = p * 1e-3
+    p_bar = p * 1e-2   # true bar = pressures_layers*1e-5 ; legacy p*1e-3 was bar/10
     k_cr = _safe_exp(-(dg_cr_cond - dg_cr_gas) * 1e3 / (CST_R * t)) if t > 0 else 0.0
     qsat_cr = k_cr / p_bar if p_bar > 0 else 0.0
     vmr_sat[cond_cr] = qsat_cr
@@ -1896,9 +1899,9 @@ def _calculate_fe_ni_co(
     with pressures_layers in Pa, so bar = p*1e-2 = pressures_layers*1e-5).  This
     matches the Fortran's ``p`` and the already-corrected gas-phase routines
     (_equil_co_si_o, _calculate_nh3_n2_hcn).  NB the other condensation routines
-    (_calculate_cr, _calculate_cl_na_k, _calculate_p) still use the legacy
-    ``p*1e-3`` = bar/10 and carry the same 10x pressure error -- to be fixed in
-    their own installments.
+    (_calculate_cr, _calculate_cl_na_k, _calculate_p, _calculate_ca_o_ti_v,
+    _calculate_mn_s, _calculate_zn_s) have NOW been corrected to the same
+    ``p*1e-2`` = true bar (previously p*1e-3 = bar/10).
 
     Ni/Co alloy formation and the interpolated cloud-base (pcfe/tc) bookkeeping
     in the Fortran are not reproduced: neither feeds back into gas-phase Fe or
@@ -1965,8 +1968,9 @@ def _calculate_ca_o_ti_v(
     aloft) instead of condensing out (~1e-300), the ~270 dex error seen in the
     comparison and the spurious optical/NIR opacity that inflates the transit
     spectrum.  Element budgets use ``gas_element_abd`` (rained-out, carried up)
-    exactly as the Fortran does; pressure uses this module's ``p_bar=p·1e-3``
-    convention for consistency with the gas partition.
+    exactly as the Fortran does; pressure uses ``p_bar=p·1e-2`` = true bar
+    (= pressures_layers·1e-5), matching the Fortran (FIXED: was p·1e-3 = bar/10,
+    which left TiO/VO under-condensed at depth).
     """
     idx_ti   = gas_id("Ti");   idx_tio  = gas_id("TiO");  idx_tio2 = gas_id("TiO2")
     idx_v    = gas_id("V");    idx_vo   = gas_id("VO");   idx_vo2  = gas_id("VO2")
@@ -1978,7 +1982,7 @@ def _calculate_ca_o_ti_v(
     dg_vo   = gases_delta_g_i[idx_vo];   dg_vo2  = gases_delta_g_i[idx_vo2]
     dg_h2o  = gases_delta_g_i[idx_h2o];  dg_ca   = gases_delta_g_i[idx_ca]
 
-    p_bar = p * 1e-3
+    p_bar = p * 1e-2   # true bar = pressures_layers*1e-5 ; legacy p*1e-3 was bar/10
     qh2   = vmr[idx_h2] if vmr[idx_h2] > 0 else 1.0
     qh2o  = max(vmr[idx_h2o], 0.0)
     TINY  = 1e-300
@@ -2116,7 +2120,8 @@ def _calculate_mg_si_o_simple(
     """Simplified silicate condensation (FALLBACK, pre-sink "3b" behaviour).
 
     Enstatite-only, single-shot at the first supersaturated layer; uses the
-    legacy ``p_bar = p*1e-3`` (bar/10) and never touches ``gas_element_abd``
+    pressure now ``p_bar = p*1e-2`` = true bar (was p*1e-3 = bar/10); still never
+    touches ``gas_element_abd``
     nor re-solves C/O/Si, so the O it removes cannot propagate upward.
     Retained verbatim and selected when ``_USE_MG_SI_O_SINK is False``.
     """
@@ -2128,7 +2133,7 @@ def _calculate_mg_si_o_simple(
     dg_sio    = gases_delta_g_i[idx_sio]
     dg_h2o    = gases_delta_g_i[gas_id("H2O")]
 
-    p_bar = p * 1e-3
+    p_bar = p * 1e-2   # true bar = pressures_layers*1e-5 ; legacy p*1e-3 was bar/10
     qh2   = vmr[gas_id("H2")]
     qmg   = vmr[gas_id("Mg")]
     qsio  = vmr[idx_sio]
@@ -2460,7 +2465,7 @@ def _calculate_mn_s(
     dg_mn  = gases_delta_g_i[idx_mn]
     dg_h2s = gases_delta_g_i[idx_h2s]
 
-    p_bar = p * 1e-3
+    p_bar = p * 1e-2   # true bar = pressures_layers*1e-5 ; legacy p*1e-3 was bar/10
     qh2   = vmr[gas_id("H2")]
     qmn   = vmr[idx_mn]
     qh2s  = vmr[idx_h2s]
@@ -2494,7 +2499,7 @@ def _calculate_zn_s(
     dg_zn  = gases_delta_g_i[idx_zn]
     dg_h2s = gases_delta_g_i[idx_h2s]
 
-    p_bar = p * 1e-3
+    p_bar = p * 1e-2   # true bar = pressures_layers*1e-5 ; legacy p*1e-3 was bar/10
     qh2   = vmr[gas_id("H2")]
 
     k_zns = equilibrium_constant_gases([-1, -1, 1],
@@ -2514,24 +2519,87 @@ def _calculate_zn_s(
     return vmr
 
 
-def _calculate_p(t, p, ip, vmr, gases_delta_g_i):
-    """P → PH₃ equilibrium (simplified)."""
-    idx_ph3 = gas_id("PH3")
-    idx_p   = gas_id("P")
+def _calculate_p(t, p, ip, vmr, gases_delta_g_i, condensates_delta_g_i,
+                 is_condensed, gas_element_abd, at_equilibrium):
+    """P / PH3 / P2 / PH2 / PO equilibrium + H3PO4 condensation.
 
-    dg_ph3 = gases_delta_g_i[idx_ph3]
-    dg_p   = gases_delta_g_i[idx_p]
+    Faithful port of the Fortran ``calculate_p_equilibrium`` (chemistry.f90
+    1265-1317).  The previous version was a one-reaction simplification
+    (P + 1.5 H2 -> PH3 from a held atomic-P value) that left PH3 flat at ~the
+    elemental P abundance (~4.6e-6) at every level.  This partitions the
+    *fixed* elemental P budget across PH3/P/P2/PH2/PO and adds the H3PO4
+    condensation sink, reproducing the Fortran's fall in PH3 at depth (P and
+    P2 take over at high T) and aloft (H3PO4 rains out at low T).
 
-    p_bar = p * 1e-3
-    qh2   = vmr[gas_id("H2")]
-    qp    = vmr[idx_p]
+    Ratios relative to PH3 (Fortran k_eq = ECG / qH2^{H2 stoich}; _keq is the
+    matching wrapper):
+        P   = k_eq_ph3 * PH3          2PH3 -> 2P  + 3H2
+        P2  = k_eq_p2  * PH3^2        2PH3 -> P2  + 3H2
+        PH2 = k_eq_ph2 * PH3          2PH3 -> 2PH2 + H2
+        PO  = k_eq_po  * PH3          2PH3 + 2H2O -> 2PO + 5H2
+    Mass balance PH3*term + 2*P2 = P_elem gives PH3 (linear when P2 is
+    negligible, else the quadratic root), then the rest are back-substituted.
 
-    # P + 1.5 H₂ → PH₃
-    k_ph3 = equilibrium_constant_gases([-2, -3, 2],
-                                       [dg_p, 0.0, dg_ph3],
-                                       p_bar, t)
-    if qp > 0 and qh2 > 0:
-        qph3 = math.sqrt(max(k_ph3 * qp**2 * qh2**3, 0.0))
-        vmr[idx_ph3] = qph3
+    Pressure: ``p_bar = p * 1e-2`` is true bar (= pressures_layers*1e-5),
+    matching the Fortran's ``p`` and the gas-phase routines; the previous code
+    used ``p*1e-3`` = bar/10.
+
+    P budget index: gas_element_abd[14] is phosphorus (Z=15 -> Z-1=14), the
+    same (Z-1) convention used by the alkali routine (S sits at 15).
+    """
+    idx_ph3 = gas_id("PH3"); idx_p = gas_id("P");   idx_p2 = gas_id("P2")
+    idx_ph2 = gas_id("PH2"); idx_po = gas_id("PO"); idx_h2o = gas_id("H2O")
+    idx_h2  = gas_id("H2")
+    cid_h3po4 = condensate_id("H3PO4")
+    iP = 14                                # phosphorus elemental abundance (Z-1)
+
+    p_bar  = p * 1e-2                       # true bar
+    qh2    = vmr[idx_h2]  if vmr[idx_h2]  > 0 else 1e-300
+    qh2o   = vmr[idx_h2o] if vmr[idx_h2o] > 0 else 0.0
+    p_elem = max(gas_element_abd[iP, ip], 0.0)
+
+    # Equilibrium ratios relative to PH3.
+    k_eq_ph3 = math.sqrt(max(_keq(["PH3", "P", "H2"], [-2, 2, 3],
+                                  gases_delta_g_i, p_bar, t, qh2), 0.0))
+    k_eq_p2  = _keq(["PH3", "P2", "H2"], [-2, 1, 3], gases_delta_g_i, p_bar, t, qh2)
+    k_eq_ph2 = math.sqrt(max(_keq(["PH3", "PH2", "H2"], [-2, 2, 1],
+                                  gases_delta_g_i, p_bar, t, qh2), 0.0))
+    k_eq_po  = math.sqrt(max(_keq(["PH3", "H2O", "PO", "H2"], [-2, -2, 2, 5],
+                                  gases_delta_g_i, p_bar, t, qh2), 0.0)) * qh2o
+
+    # H3PO4 -> PH3 + 4H2O + 4H2  (saturation: PH3_sat = k_eq_h3po4 / H2O^4).
+    if t > 0 and p_bar > 0:
+        k_eq_h3po4 = _safe_exp((condensates_delta_g_i[cid_h3po4]
+                                - gases_delta_g_i[idx_ph3]
+                                - 4.0 * gases_delta_g_i[idx_h2o]) * 1e3
+                               / (CST_R * t)) * qh2 ** 4 / p_bar
+    else:
+        k_eq_h3po4 = 0.0
+
+    term = 1.0 + k_eq_ph2 + k_eq_ph3 + k_eq_po
+
+    # Partition the fixed P budget: 2*k_eq_p2*PH3^2 + term*PH3 - P_elem = 0.
+    if k_eq_p2 <= 0.0 or term ** 2 > 1e6 * p_elem * k_eq_p2:
+        vmr[idx_ph3] = p_elem / term if term > 0 else 0.0
+    else:
+        vmr[idx_ph3] = (-term + math.sqrt(term ** 2 + 8.0 * p_elem * k_eq_p2)) \
+                       / (4.0 * k_eq_p2)
+
+    # H3PO4 condensation (equilibrium only) -- the low-T phosphorus sink.
+    if at_equilibrium and qh2o > 0.0:
+        ph3_sat = k_eq_h3po4 / qh2o ** 4
+        if ph3_sat < vmr[idx_ph3]:
+            if not is_condensed[cid_h3po4]:
+                # NB the Fortran marks NH4Cl here (a copy-paste typo); the PH3
+                # cap and budget update below are unaffected by which flag is set.
+                is_condensed[cid_h3po4] = True
+            vmr[idx_ph3] = ph3_sat
+            gas_element_abd[iP, ip] = vmr[idx_ph3] * (term + 2.0 * k_eq_p2 * vmr[idx_ph3])
+
+    # Back out the other P-bearing species from PH3.
+    vmr[idx_p]   = k_eq_ph3 * vmr[idx_ph3]
+    vmr[idx_p2]  = k_eq_p2  * vmr[idx_ph3] ** 2
+    vmr[idx_ph2] = k_eq_ph2 * vmr[idx_ph3]
+    vmr[idx_po]  = k_eq_po  * vmr[idx_ph3]
 
     return vmr
