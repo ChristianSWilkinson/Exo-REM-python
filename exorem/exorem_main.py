@@ -515,6 +515,20 @@ def run_exorem(input_file: str | Path) -> dict:
                       f"max ΔT={_adj_info['max_dT']:.1f} K, "
                       f"enthalpy Δ={_adj_info['enthalpy_rel_change']*100:+.2f}%")
 
+        # Deep-zone adiabat guard (every iteration once convection is active).
+        # Prevents the optically-thick deep zone from collapsing below the
+        # adiabat / inverting at the bottom — the failure mode that dominates
+        # the high-metallicity profile. Below the RCB only; a no-op for
+        # well-converged (low-metallicity) cases. See _enforce_deep_adiabat.
+        if (DEEP_ZONE_ADIABAT_GUARD
+                and iteration >= retrieval.n_non_adiabatic_iterations):
+            _dg_info = _enforce_deep_adiabat(
+                atm, target, spec, gases_vmr, gases_c_p, temperatures_thermo)
+            if _dg_info["active"] and iteration == retrieval.n_non_adiabatic_iterations:
+                print(f"  deep-adiabat guard: RCB at L={_dg_info['rcb_level']} "
+                      f"(P={_dg_info['rcb_pressure']:.2e} Pa), "
+                      f"max ΔT={_dg_info['max_dT']:.1f} K")
+
         # r46: periodic radiative-zone jump smoother. Every SMOOTH_INTERVAL
         # iterations, dissolve big cold-trough/hot-bump discontinuities above
         # the RCB, then let the retrieval re-converge. Complements (does not
@@ -2990,6 +3004,125 @@ def _init_adiabat(
                   f"(DGRAD={DGRAD:.4f}), anchored at the RCB and built downward")
         else:
             print("    No super-adiabatic deep zone found; profile left to RT.")
+
+
+# Guard toggle: pin the deep convective zone to the adiabat every iteration.
+# See _enforce_deep_adiabat. Needed for optically-thick (high-metallicity) deep
+# zones where the convective closure alone lets the bottom collapse; a no-op for
+# well-converged cases, so it is safe to leave on.
+DEEP_ZONE_ADIABAT_GUARD = True
+
+
+def _enforce_deep_adiabat(
+    atm: Atmosphere, target: Target, spec: Species,
+    gases_vmr: np.ndarray, gases_c_p: np.ndarray,
+    temperatures_thermo: np.ndarray,
+) -> dict:
+    """Pin the deep convective zone to the adiabat after every Newton step.
+
+    Companion to ``_init_adiabat`` (which runs only once, at
+    ``n_non_adiabatic_iterations``).  At high metallicity the deep atmosphere is
+    optically very thick, so essentially all of the internal flux must be
+    carried by convection.  The convective term (``_add_convective_term``) only
+    *couples* interfaces where ``gr > grad_ad``; it does not, on its own, stop
+    the optimal-estimation step from cooling the deepest layers below the
+    adiabat.  Once that happens the lapse rate there drops under ``grad_ad``,
+    the convective coupling switches off, the bottom inverts (T decreasing with
+    depth) and convection is locked out — a self-reinforcing collapse.  The
+    Fortran reference rides through this because its deep zone never leaves the
+    adiabat; the Python OE step, with its extra regularisation, can.
+
+    This routine prevents the collapse by re-projecting the *contiguous deep
+    convective zone* onto ``grad_ad + DGRAD`` each iteration, anchored at the
+    radiative-convective boundary (whose temperature is set by the stable
+    radiative zone above) and built downward.  Unlike ``_init_adiabat`` it
+    projects **unconditionally** below the RCB, so a transient inversion is
+    healed rather than skipped.  Only the zone *below* the RCB is touched; the
+    radiative upper atmosphere is left entirely to the retrieval (this is the
+    crucial difference from the per-step ``_init_adiabat`` re-clamp removed in
+    r31, which corrupted the upper atmosphere).
+
+    The RCB is the shallowest super-adiabatic interface (scanning top-down)
+    whose convective zone reaches the bottom without a *stably radiative* gap
+    (``0 <= gr < grad_ad``); inverted interfaces (``gr < 0``) count as collapsed
+    convection, not a gap, so a thin detached upper cell is never mistaken for
+    the deep RCB.  No-op when no such deep zone exists — e.g. the well-converged
+    low-metallicity cases, whose deep zone is already on the adiabat, so the
+    projection reproduces the incoming temperatures to round-off.
+
+    Returns a small diagnostics dict.
+    """
+    n_levels = atm.n_levels
+    n_layers = atm.n_layers
+    P = atm.pressures
+    T = atm.temperatures
+    RADIATIVE_TOL = 0.10        # gr below grad_ad*(1-tol) AND >=0 == radiative gap
+
+    def _grad_ad_at(idx_deep: int, idx_shallow: int,
+                    corr_layer: Optional[int] = None) -> float:
+        # Identical to the helper nested in _init_adiabat.
+        t_lay = math.sqrt(T[idx_deep] * T[idx_shallow])
+        lay_j = min(idx_deep, n_layers - 1)
+        cpr = sum(gases_vmr[k, lay_j]
+                  * interp_ex_0d(t_lay, temperatures_thermo, gases_c_p[k, :])
+                  for k in range(N_GASES)) / CST_R
+        if CORR_ADIA:
+            lc = idx_shallow if corr_layer is None else corr_layer
+            lc = min(lc, n_layers - 1)
+            corr, dcpr = _corr_adia(t_lay,
+                                    gases_vmr[_I_H2, lc],
+                                    gases_vmr[_I_H,  lc])
+            denom = cpr + dcpr
+            return (corr / denom) if denom > 0 else 0.0
+        return (1.0 / cpr) if cpr > 0 else 0.0
+
+    # Pre-compute lapse rate and adiabatic gradient at every interface.
+    gr = np.zeros(n_levels)
+    ga = np.zeros(n_levels)
+    for j in range(1, n_levels):
+        if P[j - 1] == P[j]:
+            continue
+        gr[j] = math.log(T[j - 1] / T[j]) / math.log(P[j - 1] / P[j])
+        ga[j] = _grad_ad_at(j - 1, j)
+
+    # RCB: shallowest super-adiabatic interface whose zone reaches the bottom.
+    rcb = -1
+    for iu in range(n_levels - 2, 1, -1):
+        if ga[iu] > 0.0 and gr[iu] > ga[iu] + DGRAD:
+            reaches_bottom = True
+            for jd in range(iu - 1, 0, -1):
+                if ga[jd] > 0.0 and 0.0 <= gr[jd] < ga[jd] * (1.0 - RADIATIVE_TOL):
+                    reaches_bottom = False
+                    break
+            if reaches_bottom:
+                rcb = iu
+                break
+
+    if rcb < 0:
+        return {"active": False, "rcb_level": -1, "max_dT": 0.0}
+
+    T_before = T.copy()
+    # Project every level below the RCB onto grad_ad + DGRAD, built downward.
+    for iu in range(rcb, 1, -1):
+        g = _grad_ad_at(iu - 1, iu)
+        if g <= 0.0:
+            continue
+        T[iu - 1] = T[iu] * (P[iu - 1] / P[iu]) ** (g + DGRAD)
+    # Deepest level (0) from level 1, with the Fortran's deep corr-layer index.
+    g0 = _grad_ad_at(0, 1, corr_layer=0)
+    if g0 > 0.0:
+        T[0] = T[1] * (P[0] / P[1]) ** (g0 + DGRAD)
+
+    atm.temperatures_layers[:] = np.sqrt(
+        atm.temperatures[:n_layers] * atm.temperatures[1:n_levels])
+
+    return {
+        "active": True,
+        "rcb_level": int(rcb),
+        "rcb_pressure": float(P[rcb]),
+        "max_dT": float(np.max(np.abs(T - T_before))),
+        "level_max_dT": int(np.argmax(np.abs(T - T_before))),
+    }
 
 
 # =====================================================================

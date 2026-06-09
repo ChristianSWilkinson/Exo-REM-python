@@ -906,7 +906,7 @@ def _calculate_h2_h_equilibrium(
 
     # 2H → H₂  :  ΔG = -2·g_H  (H₂ is reference, g_H₂ = 0)
     k_eq = equilibrium_constant_gases([-2, 1], [dg_h, 0.0],
-                                      p * 1e-3, t)        # mbar → bar
+                                      p * 1e-2, t)        # true bar (= pressures_layers*1e-5); was p*1e-3 = bar/10
 
     # Conserved total H atoms (per total atmosphere mole)
     total_h = 2.0 * vmr[idx_h2] + vmr[idx_h]
@@ -1851,7 +1851,7 @@ def _calculate_cr(
     dg_cr_gas  = gases_delta_g_i[idx_cr]
 
     p_bar = p * 1e-2   # true bar = pressures_layers*1e-5 ; legacy p*1e-3 was bar/10
-    k_cr = _safe_exp(-(dg_cr_cond - dg_cr_gas) * 1e3 / (CST_R * t)) if t > 0 else 0.0
+    k_cr = _safe_exp((dg_cr_cond - dg_cr_gas) * 1e3 / (CST_R * t)) if t > 0 else 0.0  # Fortran sign exp(+(g_cond-g_gas))/p; was exp(-(...)) (reciprocal)
     qsat_cr = k_cr / p_bar if p_bar > 0 else 0.0
     vmr_sat[cond_cr] = qsat_cr
 
@@ -2472,7 +2472,7 @@ def _calculate_mn_s(
 
     # Mn + H₂S → MnS(s) + H₂
     k_mns = equilibrium_constant_gases([-1, -1, 1],
-                                       [dg_mn, dg_h2s, 0.0],
+                                       [dg_mn, dg_h2s, dg_mns],  # was 0.0 -> include MnS(s) Gibbs (qsat was missing exp(g_cond/RT))
                                        p_bar, t)
     if qmn > 0 and qh2s > 0:
         qsat_mns = qh2 / max(k_mns * qh2s, 1e-300)
@@ -2503,7 +2503,7 @@ def _calculate_zn_s(
     qh2   = vmr[gas_id("H2")]
 
     k_zns = equilibrium_constant_gases([-1, -1, 1],
-                                       [dg_zn, dg_h2s, 0.0],
+                                       [dg_zn, dg_h2s, dg_zns],  # was 0.0 -> include ZnS(s) Gibbs (qsat was missing exp(g_cond/RT))
                                        p_bar, t)
     qzn  = vmr[idx_zn]
     qh2s = vmr[idx_h2s]
